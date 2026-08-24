@@ -1,0 +1,627 @@
+// Readable model of the webmail schema. The authoritative DDL is webmail.sql.
+//
+// Generated with `dbml-tools todbml`, then corrected by hand in three places
+// because that round trip does not currently survive its own tooling:
+//   - `todbml` emits `Project {` with no name, which `dbml-tools check` rejects.
+//   - `todbml` emits `[delete: set null]`, which the parser rejects unquoted.
+//   - `tosql` emits foreign keys with no ON DELETE / ON UPDATE action, so it
+//     cannot reproduce the cascades this schema depends on.
+// Regenerating this file will reintroduce the first two.
+
+Project "webmail" {
+  database_type: 'MariaDB'
+}
+
+Table "alias" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "email" varchar(255) [unique, not null]
+  "name" varchar(255) [not null]
+  "mailbox_id" bigint(20) [not null]
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("mailbox_id") [name: "mailbox_id"]
+  }
+}
+
+Table "attachment" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "message_id" bigint(20) [not null]
+  "g_attachment_id" bigint(20) [not null]
+  "read_at" datetime
+  "deleted_at" datetime
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("g_attachment_id") [name: "g_attachment_id"]
+    ("message_id") [name: "message_id"]
+  }
+}
+
+Table "audit_log" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20)
+  "user_id" bigint(20)
+  "username" varchar(255) [not null]
+  "is_admin" tinyint(1) [not null, default: 0]
+  "created_at" datetime [not null]
+  "operation" audit_log_operation [not null]
+  "entity" varchar(255) [not null]
+  "identifier" varchar(255) [not null]
+  "changes_before" text [not null]
+  "changes_after" text [not null]
+
+  indexes {
+    ("created_at") [name: "created_at"]
+    ("customer_id") [name: "customer_id"]
+    ("entity") [name: "entity"]
+    ("user_id") [name: "user_id"]
+  }
+}
+
+Table "chat" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "mailbox_id" bigint(20) [not null]
+  "g_chat_id" bigint(20) [not null]
+  "last_read_message_id" bigint(20)
+  "muted" tinyint(1) [not null, default: 0]
+  "notification_preference" chat_notification_preference [not null, default: 'all']
+  "deleted_at" datetime
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("g_chat_id") [name: "g_chat_id"]
+    ("last_read_message_id") [name: "last_read_message_id"]
+    ("mailbox_id") [name: "mailbox_id"]
+  }
+}
+
+Table "chat_message" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "chat_id" bigint(20) [not null]
+  "g_chat_message_id" bigint(20) [not null]
+  "delivered_at" datetime
+  "read_at" datetime
+
+  indexes {
+    ("chat_id") [name: "chat_id"]
+    ("customer_id") [name: "customer_id"]
+    ("g_chat_message_id") [name: "g_chat_message_id"]
+  }
+}
+
+Table "contact" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "email" varchar(255) [not null]
+  "name" varchar(255) [not null]
+  "created_at" datetime [not null, default: 'current_timestamp()']
+  "deleted_at" datetime
+
+  indexes {
+    ("customer_id", "email") [unique, name: "customer_id_email"]
+  }
+}
+
+Table "customer" {
+  "id" bigint(20) [pk, increment, not null]
+  "name" varchar(255) [not null]
+  "default_mailbox_id" bigint(20)
+
+  indexes {
+    ("default_mailbox_id") [name: "default_mailbox_id"]
+  }
+}
+
+Table "domain" {
+  "id" int(11) [pk, increment, not null]
+  "name" varchar(255) [not null]
+  "customer_id" bigint(20)
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+  }
+}
+
+Table "email_template" {
+  "id" int(11) [pk, increment, not null]
+  "name" varchar(255) [not null]
+  "language" varchar(2) [not null]
+  "sender_name" varchar(255) [not null]
+  "sender_email" varchar(255) [not null]
+  "subject" varchar(255) [not null]
+  "body" text [not null]
+  "parameters" text [not null]
+
+  indexes {
+    ("language", "name") [unique, name: "language_name"]
+  }
+}
+
+Table "folder" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "mailbox_id" bigint(20) [not null]
+  "name" varchar(255) [not null]
+  "created_at" datetime [not null, default: 'current_timestamp()']
+  "deleted_at" datetime
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("mailbox_id") [name: "mailbox_id"]
+  }
+}
+
+Table "g_attachment" {
+  "id" bigint(20) [pk, increment, not null]
+  "g_message_id" bigint(20) [not null]
+  "file_name" varchar(255) [not null]
+  "mime_type" varchar(255) [not null]
+  "file_size" int(11) [not null]
+  "hash_md5" varchar(255) [not null]
+
+  indexes {
+    ("g_message_id") [name: "thread_id"]
+  }
+}
+
+Table "g_attendee" {
+  "id" bigint(20) [pk, increment, not null]
+  "g_meeting_id" bigint(20) [not null]
+  "email" varchar(255) [not null]
+  "will_attend" will_attend [not null, default: 'maybe']
+  "created_at" datetime [not null, default: 'current_timestamp()']
+
+  indexes {
+    ("g_meeting_id") [name: "g_meeting_id"]
+  }
+}
+
+Table "g_chat" {
+  "id" bigint(20) [pk, increment, not null]
+  "type" g_chat_type [not null]
+  "name" varchar(255)
+  "created_by_email" varchar(255) [not null]
+  "created_at" datetime [not null, default: 'current_timestamp()']
+}
+
+Table "g_chat_attachment" {
+  "id" bigint(20) [pk, increment, not null]
+  "g_chat_message_id" bigint(20) [not null]
+  "file_name" varchar(255) [not null]
+  "mime_type" varchar(255) [not null]
+  "file_size" int(11) [not null]
+  "hash_md5" varchar(255) [not null]
+
+  indexes {
+    ("g_chat_message_id") [name: "g_chat_message_id"]
+  }
+}
+
+Table "g_chat_message" {
+  "id" bigint(20) [pk, increment, not null]
+  "g_chat_id" bigint(20) [not null]
+  "sender_email" varchar(255) [not null]
+  "sender_name" varchar(255) [not null]
+  "body" mediumtext [not null]
+  "body_html" longtext
+  "created_at" datetime [not null, default: 'current_timestamp()']
+  "edited_at" datetime
+  "deleted_at" datetime
+
+  indexes {
+    ("g_chat_id") [name: "g_chat_id"]
+  }
+}
+
+Table "g_chat_participant" {
+  "id" bigint(20) [pk, increment, not null]
+  "g_chat_id" bigint(20) [not null]
+  "email" varchar(255) [not null]
+  "role" g_chat_participant_role [not null]
+  "joined_at" datetime [not null, default: 'current_timestamp()']
+  "left_at" datetime
+
+  indexes {
+    ("g_chat_id") [name: "g_chat_id"]
+  }
+}
+
+Table "g_document" {
+  "id" bigint(20) [pk, increment, not null]
+  "g_meeting_id" bigint(20) [not null]
+  "file_name" varchar(255) [not null]
+  "mime_type" varchar(255) [not null]
+  "file_size" int(11) [not null]
+  "hash_md5" varchar(255) [not null]
+
+  indexes {
+    ("g_meeting_id") [name: "g_meeting_id"]
+  }
+}
+
+Table "g_meeting" {
+  "id" bigint(20) [pk, increment, not null]
+  "g_schedule" bigint(20)
+  "title" varchar(255) [not null]
+  "start_time" datetime [not null]
+  "end_time" datetime [not null]
+  "time_zone" varchar(255) [not null]
+  "is_all_day" tinyint(1) [not null, default: 0]
+  "organizer_email" varchar(255) [not null]
+  "organizer_name" varchar(255) [not null]
+  "description" mediumtext [not null]
+  "description_html" longtext
+  "created_at" datetime [default: 'current_timestamp()']
+  "sent_at" datetime
+
+  indexes {
+    ("g_schedule") [name: "g_schedule"]
+  }
+}
+
+Table "g_message" {
+  "id" bigint(20) [pk, increment, not null]
+  "g_thread_id" bigint(20) [not null]
+  "sender_email" varchar(255) [not null]
+  "sender_name" varchar(255) [not null]
+  "body" mediumtext [not null]
+  "body_html" longtext
+  "created_at" datetime [default: 'current_timestamp()']
+  "sent_at" datetime
+
+  indexes {
+    ("g_thread_id") [name: "g_thread_id"]
+  }
+}
+
+Table "g_schedule" {
+  "id" bigint(20) [pk, increment, not null]
+  "start_time" datetime [not null]
+  "end_time" datetime [not null]
+  "time_zone" varchar(255) [not null]
+  "repeat_rule" mediumtext [not null]
+  "recurrence_dates" mediumtext [not null]
+  "exception_dates" mediumtext [not null]
+  "repeat_rule_human_readable" varchar(255) [not null]
+  "created_at" datetime [default: 'current_timestamp()']
+  "sent_at" datetime
+}
+
+Table "g_subscription" {
+  "id" bigint(20) [pk, increment, not null]
+  "g_thread_id" bigint(20) [not null]
+  "email" varchar(255) [not null]
+
+  indexes {
+    ("g_thread_id") [name: "g_thread_id"]
+  }
+}
+
+Table "g_thread" {
+  "id" bigint(20) [pk, increment, not null]
+  "subject_line" varchar(255) [not null]
+  "body_summary" varchar(255) [not null, default: '']
+  "created_at" datetime [not null, default: 'current_timestamp()']
+  "updated_at" datetime [default: 'current_timestamp()']
+}
+
+Table "inbound_email" {
+  "provider_id" varchar(255) [pk, not null]
+  "received_at" datetime [not null, default: 'current_timestamp()']
+
+  indexes {
+    ("received_at") [name: "received_at"]
+  }
+}
+
+Table "mailbox" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "user_id" bigint(20)
+  "name" varchar(255) [not null]
+  "color" varchar(255) [not null]
+  "default_folder_id" bigint(20)
+  "default_alias_id" bigint(20)
+  "created_at" datetime [not null, default: 'current_timestamp()']
+  "deleted_at" datetime
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("default_alias_id") [name: "default_alias_id"]
+    ("default_folder_id") [name: "inbox_folder_id"]
+    ("user_id") [name: "user_id"]
+  }
+}
+
+Table "meeting" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "g_meeting_id" bigint(20) [not null]
+  "mailbox_id" bigint(20) [not null]
+  "schedule_id" bigint(20)
+  "will_attend" will_attend
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("g_meeting_id") [name: "g_meeting_id"]
+    ("mailbox_id") [name: "mailbox_id"]
+    ("schedule_id") [name: "schedule_id"]
+  }
+}
+
+Table "message" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "thread_id" bigint(20) [not null]
+  "g_message_id" bigint(20) [not null]
+  "read_at" datetime
+  "deleted_at" datetime
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("g_message_id") [name: "g_message_id"]
+    ("thread_id") [name: "thread_id"]
+  }
+}
+
+Table "message_status" {
+  "id" bigint(20) [pk, increment, not null]
+  "g_chat_message_id" bigint(20) [not null]
+  "recipient_email" varchar(255) [not null]
+  "status" message_status_status [not null]
+  "timestamp" datetime [not null]
+
+  indexes {
+    ("g_chat_message_id") [name: "g_chat_message_id"]
+  }
+}
+
+Table "notification_preference" {
+  "id" bigint(20) [pk, increment, not null]
+  "user_id" bigint(20) [unique, not null]
+  "frequency" notification_preference_frequency [not null, default: 'daily_digest']
+  "quiet_hours_start" time
+  "quiet_hours_end" time
+}
+
+Table "presence_status" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "user_id" bigint(20) [unique, not null]
+  "status" presence_status_status [not null]
+  "last_activity_at" datetime [not null]
+  "updated_at" datetime [not null, default: 'current_timestamp()']
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+  }
+}
+
+Table "reminder_event" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "mailbox_id" bigint(20) [not null]
+  "g_meeting_id" bigint(20) [not null]
+  "scheduled_at" datetime [not null]
+  "sent_at" datetime
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("g_meeting_id") [name: "g_meeting_id"]
+    ("mailbox_id") [name: "mailbox_id"]
+    ("scheduled_at") [name: "scheduled_at"]
+    ("sent_at") [name: "sent_at"]
+  }
+}
+
+Table "schedule" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "g_schedule_id" bigint(20) [not null]
+  "mailbox_id" bigint(20) [not null]
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("g_schedule_id") [name: "g_schedule_id"]
+    ("mailbox_id") [name: "mailbox_id"]
+  }
+}
+
+Table "sent_email" {
+  "id" int(11) [pk, increment, not null]
+  "customer_id" bigint(20)
+  "from_name" varchar(255) [not null]
+  "from_email" varchar(255) [not null]
+  "to_name" varchar(255) [not null]
+  "to_email" varchar(255) [not null]
+  "preferred_language" varchar(2) [not null]
+  "template_name" varchar(255) [not null]
+  "language" varchar(2) [not null]
+  "parameters" text [not null]
+  "bcc_email" varchar(255) [not null]
+  "subject" varchar(255) [not null]
+  "body" text [not null]
+  "status" varchar(255) [not null]
+  "status_message" varchar(255) [not null]
+  "created_at" datetime [not null]
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("to_email") [name: "to_email"]
+  }
+}
+
+Table "thread" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "folder_id" bigint(20) [not null]
+  "g_thread_id" bigint(20) [not null]
+  "read_at" datetime
+  "deleted_at" datetime
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("folder_id") [name: "folder_id"]
+    ("g_thread_id") [name: "g_thread_id"]
+  }
+}
+
+Table "token" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "user_id" bigint(20) [not null]
+  "name" varchar(255) [not null]
+  "value" varchar(255) [unique, not null]
+  "created_at" datetime [not null, default: 'current_timestamp()']
+  "validated_at" datetime [not null, default: 'current_timestamp()']
+  "used_at" datetime
+  "valid_until" datetime
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("user_id") [name: "user_id"]
+  }
+}
+
+Table "typing_indicator" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "g_chat_id" bigint(20) [not null]
+  "user_id" bigint(20) [not null]
+  "started_at" datetime [not null, default: 'current_timestamp()']
+  "expires_at" datetime [not null]
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+    ("expires_at") [name: "expires_at"]
+    ("g_chat_id") [name: "g_chat_id"]
+    ("user_id") [name: "user_id"]
+  }
+}
+
+Table "user" {
+  "id" bigint(20) [pk, increment, not null]
+  "customer_id" bigint(20) [not null]
+  "username" varchar(255) [not null]
+  "password" varchar(255) [not null]
+  "name" varchar(255) [not null]
+  "is_admin" int(1) [not null, default: 0]
+  "created_at" datetime [not null, default: 'current_timestamp()']
+  "modified_at" datetime [not null, default: 'current_timestamp()']
+
+  indexes {
+    ("customer_id") [name: "customer_id"]
+  }
+}
+
+Enum "will_attend" {
+  "yes"
+  "no"
+  "maybe"
+}
+
+Enum "audit_log_operation" {
+  insert
+  update
+  delete
+}
+
+Enum "chat_notification_preference" {
+  all
+  mentions_only
+  none
+}
+
+Enum "g_chat_type" {
+  direct
+  group
+}
+
+Enum "g_chat_participant_role" {
+  creator
+  admin
+  member
+}
+
+Enum "message_status_status" {
+  sent
+  delivered
+  read
+}
+
+Enum "notification_preference_frequency" {
+  daily_digest
+  hourly_digest
+}
+
+Enum "presence_status_status" {
+  online
+  offline
+  away
+}
+
+Ref: "alias"."mailbox_id" > "mailbox"."id" [delete: cascade]
+Ref: "alias"."customer_id" > "user"."id" [delete: cascade]
+Ref: "attachment"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "attachment"."message_id" > "message"."id" [delete: cascade]
+Ref: "attachment"."g_attachment_id" > "g_attachment"."id" [delete: cascade]
+Ref: "audit_log"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "audit_log"."user_id" > "user"."id" [delete: cascade]
+Ref: "chat"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "chat"."mailbox_id" > "mailbox"."id" [delete: cascade]
+Ref: "chat"."g_chat_id" > "g_chat"."id" [delete: cascade]
+Ref: "chat"."last_read_message_id" > "g_chat_message"."id" [delete: "set null"]
+Ref: "chat_message"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "chat_message"."chat_id" > "chat"."id" [delete: cascade]
+Ref: "chat_message"."g_chat_message_id" > "g_chat_message"."id" [delete: cascade]
+Ref: "contact"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "customer"."default_mailbox_id" > "mailbox"."id" [delete: "set null"]
+Ref: "domain"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "folder"."customer_id" > "user"."id" [delete: cascade]
+Ref: "folder"."mailbox_id" > "mailbox"."id" [delete: cascade]
+Ref: "g_attachment"."g_message_id" > "g_message"."id" [delete: cascade]
+Ref: "g_attendee"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
+Ref: "g_chat_attachment"."g_chat_message_id" > "g_chat_message"."id" [delete: cascade]
+Ref: "g_chat_message"."g_chat_id" > "g_chat"."id" [delete: cascade]
+Ref: "g_chat_participant"."g_chat_id" > "g_chat"."id" [delete: cascade]
+Ref: "g_document"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
+Ref: "g_meeting"."g_schedule" > "g_schedule"."id"
+Ref: "g_message"."g_thread_id" > "g_thread"."id" [delete: cascade]
+Ref: "g_subscription"."g_thread_id" > "g_thread"."id" [delete: cascade]
+Ref: "mailbox"."default_folder_id" > "folder"."id" [delete: "set null"]
+Ref: "mailbox"."default_alias_id" > "alias"."id" [delete: "set null"]
+Ref: "mailbox"."customer_id" > "user"."id" [delete: cascade]
+Ref: "mailbox"."user_id" > "user"."id" [delete: "set null"]
+Ref: "meeting"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "meeting"."mailbox_id" > "mailbox"."id" [delete: cascade]
+Ref: "meeting"."schedule_id" > "schedule"."id"
+Ref: "meeting"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
+Ref: "message"."customer_id" > "user"."id" [delete: cascade]
+Ref: "message"."thread_id" > "thread"."id" [delete: cascade]
+Ref: "message"."g_message_id" > "g_message"."id" [delete: cascade]
+Ref: "message_status"."g_chat_message_id" > "g_chat_message"."id" [delete: cascade]
+Ref: "notification_preference"."user_id" > "user"."id" [delete: cascade]
+Ref: "presence_status"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "presence_status"."user_id" > "user"."id" [delete: cascade]
+Ref: "reminder_event"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "reminder_event"."mailbox_id" > "mailbox"."id" [delete: cascade]
+Ref: "reminder_event"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
+Ref: "schedule"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "schedule"."mailbox_id" > "mailbox"."id" [delete: cascade]
+Ref: "schedule"."g_schedule_id" > "g_schedule"."id" [delete: cascade]
+Ref: "sent_email"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "thread"."customer_id" > "user"."id" [delete: cascade]
+Ref: "thread"."folder_id" > "folder"."id" [delete: cascade]
+Ref: "thread"."g_thread_id" > "g_thread"."id" [delete: cascade]
+Ref: "token"."user_id" > "user"."id" [delete: cascade]
+Ref: "token"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "typing_indicator"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "typing_indicator"."g_chat_id" > "g_chat"."id" [delete: cascade]
+Ref: "typing_indicator"."user_id" > "user"."id" [delete: cascade]
+Ref: "user"."customer_id" > "customer"."id" [delete: cascade]
+Ref: "user"."customer_id" > "customer"."id" [delete: cascade]

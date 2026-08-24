@@ -1,0 +1,7 @@
+# Build output
+/webmail-server
+/bin/
+
+# Local configuration and data
+/data/
+*.local

@@ -1,0 +1,1098 @@
+// Package email implements the mail domain: mailboxes, folders, threads,
+// subscribers, messages, attachments and contacts. It is the Go port of
+// MintyPHP's EmailClient and carries the same projection invariants: canonical
+// content lives in the g_* tables and every user sees it through their own
+// projection rows.
+package email
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"io"
+	"log/slog"
+	"math/big"
+	"time"
+
+	crand "crypto/rand"
+
+	"github.com/mevdschee/webmail-server/internal/blob"
+	"github.com/mevdschee/webmail-server/internal/store"
+)
+
+// Notifier sends one notification email. It is what *notify.Service satisfies,
+// declared here so the mail domain does not depend on the outbound package.
+//
+// It takes a template name and parameters, never a body: per ADR 4 no message
+// content may leave by email, and this signature is what makes that impossible
+// to get wrong from here.
+type Notifier interface {
+	Send(ctx context.Context, customerID *int64, toName, toEmail, templateName,
+		preferredLanguage string, params map[string]string, bccEmail string) error
+}
+
+// Service implements the mail domain against a database and a blob store.
+type Service struct {
+	db   *store.DB
+	blob *blob.Store
+	// notifier is nil when outbound mail is not configured, which disables
+	// onboarding invitations rather than failing delivery.
+	notifier Notifier
+	log      *slog.Logger
+}
+
+// New returns a Service. attachments is the directory holding attachment bytes.
+// notifier may be nil.
+func New(db *store.DB, attachments *blob.Store, notifier Notifier, log *slog.Logger) *Service {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	return &Service{db: db, blob: attachments, notifier: notifier, log: log}
+}
+
+// Party is an email address with the display name the viewing customer knows
+// it by, which may be empty.
+type Party struct {
+	Email string `json:"email"`
+	Name  string `json:"name"`
+}
+
+// Mailbox is a user's mailbox with its default sending identity.
+type Mailbox struct {
+	MailboxID   int64  `json:"mailboxId"`
+	Name        string `json:"name"`
+	Color       string `json:"color"`
+	UnreadCount int64  `json:"unreadCount"`
+	IsDefault   bool   `json:"isDefault"`
+	IsShared    bool   `json:"isShared"`
+	SenderEmail string `json:"senderEmail"`
+	SenderName  string `json:"senderName"`
+}
+
+// Folder organises threads inside a mailbox.
+type Folder struct {
+	FolderID    int64  `json:"folderId"`
+	Name        string `json:"name"`
+	UnreadCount int64  `json:"unreadCount"`
+	IsDefault   bool   `json:"isDefault"`
+}
+
+// Thread is a conversation as one customer sees it.
+type Thread struct {
+	ThreadID        int64   `json:"threadId"`
+	Subject         string  `json:"subject"`
+	Summary         string  `json:"summary"`
+	UnreadCount     int64   `json:"unreadCount"`
+	Subscribers     []Party `json:"subscribers"`
+	AttachmentCount int64   `json:"attachmentCount"`
+	UpdatedAt       string  `json:"updatedAt"`
+}
+
+// AttachmentRef is attachment metadata as listed with a message.
+type AttachmentRef struct {
+	AttachmentID int64  `json:"attachmentId"`
+	FileName     string `json:"fileName"`
+	MimeType     string `json:"mimeType"`
+	FileSize     int64  `json:"fileSize"`
+}
+
+// Message is one message in a thread as one customer sees it.
+type Message struct {
+	MessageID   int64           `json:"messageId"`
+	SenderEmail string          `json:"senderEmail"`
+	SenderName  string          `json:"senderName"`
+	Recipients  []Party         `json:"recipients"`
+	Body        string          `json:"body"`
+	SentAt      string          `json:"sentAt"`
+	ReadAt      *string         `json:"readAt"`
+	Attachments []AttachmentRef `json:"attachments"`
+}
+
+// AttachmentData is an attachment with its bytes, base64 encoded by the API.
+type AttachmentData struct {
+	FileName string `json:"fileName"`
+	MimeType string `json:"mimeType"`
+	FileSize int64  `json:"fileSize"`
+	FileData []byte `json:"fileData"`
+}
+
+// Contact is an address book entry.
+type Contact struct {
+	ContactID int64  `json:"contactId"`
+	Email     string `json:"email"`
+	Name      string `json:"name"`
+}
+
+// NewAttachment is an attachment supplied when composing.
+type NewAttachment struct {
+	FileName string
+	MimeType string
+	FileData []byte
+}
+
+// rfc3339 formats a timestamp the way PHP's date('c') does, with an explicit
+// +00:00 offset rather than Go's "Z", so responses stay byte-identical to the
+// PHP backend while both are in service.
+func rfc3339(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05-07:00") }
+
+func rfc3339Ptr(t sql.NullTime) *string {
+	if !t.Valid {
+		return nil
+	}
+	s := rfc3339(t.Time)
+	return &s
+}
+
+// DefaultMailboxID returns the customer's default mailbox, or 0.
+func (s *Service) DefaultMailboxID(ctx context.Context, customerID int64) (int64, error) {
+	return store.SelectInt(ctx, s.db,
+		"SELECT `default_mailbox_id` FROM `customer` WHERE `id` = ? LIMIT 1", customerID)
+}
+
+// DefaultFolderID returns a mailbox's default folder, or 0.
+func (s *Service) DefaultFolderID(ctx context.Context, customerID, mailboxID int64) (int64, error) {
+	return store.SelectInt(ctx, s.db,
+		"SELECT `default_folder_id` FROM `mailbox` WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
+		customerID, mailboxID)
+}
+
+// MailboxIDForFolder returns the mailbox a folder belongs to, or 0 when the
+// folder does not belong to this customer.
+func (s *Service) MailboxIDForFolder(ctx context.Context, customerID, folderID int64) (int64, error) {
+	return store.SelectInt(ctx, s.db,
+		"SELECT `mailbox_id` FROM `folder` WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
+		customerID, folderID)
+}
+
+// MailboxExists reports whether the mailbox belongs to the customer.
+func (s *Service) MailboxExists(ctx context.Context, customerID, mailboxID int64) (bool, error) {
+	id, err := store.SelectInt(ctx, s.db,
+		"SELECT `id` FROM `mailbox` WHERE `customer_id` = ? AND `id` = ? LIMIT 1", customerID, mailboxID)
+	return id != 0, err
+}
+
+// ListMailboxes returns the customer's mailboxes with unread counts. A search
+// term restricts the counts to matching threads.
+func (s *Service) ListMailboxes(ctx context.Context, customerID int64, search string) ([]Mailbox, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT `mailbox`.`id`, `mailbox`.`name`, `mailbox`.`color`, "+
+		"`mailbox`.`user_id`, `alias`.`email`, `alias`.`name` "+
+		"FROM `mailbox`, `alias` "+
+		"WHERE `mailbox`.`default_alias_id` = `alias`.`id` AND `mailbox`.`customer_id` = ? "+
+		"ORDER BY `mailbox`.`id`", customerID)
+	if err != nil {
+		return nil, fmt.Errorf("list mailboxes: %w", err)
+	}
+	defer rows.Close()
+
+	var mailboxes []Mailbox
+	var ids []int64
+	for rows.Next() {
+		var m Mailbox
+		var userID sql.NullInt64
+		var name sql.NullString
+		if err := rows.Scan(&m.MailboxID, &name, &m.Color, &userID, &m.SenderEmail, &m.SenderName); err != nil {
+			return nil, fmt.Errorf("scan mailbox: %w", err)
+		}
+		m.Name = name.String
+		if m.Name == "" {
+			m.Name = m.SenderEmail
+		}
+		m.IsShared = !userID.Valid
+		mailboxes = append(mailboxes, m)
+		ids = append(ids, m.MailboxID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list mailboxes: %w", err)
+	}
+	if len(mailboxes) == 0 {
+		return []Mailbox{}, nil
+	}
+
+	counts, err := s.mailboxCounts(ctx, customerID, ids, search)
+	if err != nil {
+		return nil, err
+	}
+	defaultID, err := s.DefaultMailboxID(ctx, customerID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range mailboxes {
+		mailboxes[i].UnreadCount = counts[mailboxes[i].MailboxID]
+		mailboxes[i].IsDefault = mailboxes[i].MailboxID == defaultID
+	}
+	return mailboxes, nil
+}
+
+func (s *Service) mailboxCounts(ctx context.Context, customerID int64, ids []int64, search string) (map[int64]int64, error) {
+	in := store.Placeholders(len(ids))
+	if search != "" {
+		args := append([]any{customerID}, store.Args(ids)...)
+		args = append(args, search, search, search)
+		counts, err := store.SelectCounts(ctx, s.db,
+			"SELECT `mailbox_id`, COUNT(DISTINCT `thread`.`id`) FROM `thread` "+
+				"LEFT JOIN `folder` ON `thread`.`folder_id` = `folder`.`id` "+
+				"LEFT JOIN `g_thread` ON `thread`.`g_thread_id` = `g_thread`.`id` "+
+				"LEFT JOIN `g_message` ON `g_thread`.`id` = `g_message`.`g_thread_id` "+
+				"WHERE `thread`.`customer_id` = ? AND `mailbox_id` IN ("+in+") AND "+
+				"(MATCH(`subject_line`) AGAINST (? IN BOOLEAN MODE) "+
+				"OR MATCH(`body`) AGAINST (? IN BOOLEAN MODE) "+
+				"OR MATCH(`sender_name`) AGAINST (? IN BOOLEAN MODE)) "+
+				"GROUP BY `mailbox_id`", args...)
+		if err != nil {
+			return nil, fmt.Errorf("count matching threads per mailbox: %w", err)
+		}
+		return counts, nil
+	}
+	args := append([]any{customerID}, store.Args(ids)...)
+	counts, err := store.SelectCounts(ctx, s.db,
+		"SELECT `mailbox_id`, COUNT(`thread`.`id`) - COUNT(`read_at`) FROM `thread` "+
+			"LEFT JOIN `folder` ON `thread`.`folder_id` = `folder`.`id` "+
+			"WHERE `thread`.`customer_id` = ? AND `mailbox_id` IN ("+in+") "+
+			"GROUP BY `mailbox_id`", args...)
+	if err != nil {
+		return nil, fmt.Errorf("count unread threads per mailbox: %w", err)
+	}
+	return counts, nil
+}
+
+// ListFolders returns the folders of a mailbox with unread counts.
+func (s *Service) ListFolders(ctx context.Context, customerID, mailboxID int64, search string) ([]Folder, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `id`, `name` FROM `folder` WHERE `customer_id` = ? AND `deleted_at` IS NULL AND `mailbox_id` = ? ORDER BY `id`",
+		customerID, mailboxID)
+	if err != nil {
+		return nil, fmt.Errorf("list folders: %w", err)
+	}
+	defer rows.Close()
+
+	var folders []Folder
+	var ids []int64
+	for rows.Next() {
+		var f Folder
+		if err := rows.Scan(&f.FolderID, &f.Name); err != nil {
+			return nil, fmt.Errorf("scan folder: %w", err)
+		}
+		folders = append(folders, f)
+		ids = append(ids, f.FolderID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list folders: %w", err)
+	}
+	if len(folders) == 0 {
+		return []Folder{}, nil
+	}
+
+	in := store.Placeholders(len(ids))
+	var counts map[int64]int64
+	if search != "" {
+		args := append([]any{customerID}, store.Args(ids)...)
+		args = append(args, search, search, search)
+		counts, err = store.SelectCounts(ctx, s.db,
+			"SELECT `folder_id`, COUNT(DISTINCT `thread`.`id`) FROM `thread` "+
+				"LEFT JOIN `g_thread` ON `thread`.`g_thread_id` = `g_thread`.`id` "+
+				"LEFT JOIN `g_message` ON `g_thread`.`id` = `g_message`.`g_thread_id` "+
+				"WHERE `thread`.`customer_id` = ? AND `folder_id` IN ("+in+") AND "+
+				"(MATCH(`subject_line`) AGAINST (? IN BOOLEAN MODE) "+
+				"OR MATCH(`body`) AGAINST (? IN BOOLEAN MODE) "+
+				"OR MATCH(`sender_name`) AGAINST (? IN BOOLEAN MODE)) "+
+				"GROUP BY `folder_id`", args...)
+	} else {
+		args := append([]any{customerID}, store.Args(ids)...)
+		counts, err = store.SelectCounts(ctx, s.db,
+			"SELECT `folder_id`, COUNT(`id`) - COUNT(`read_at`) FROM `thread` "+
+				"WHERE `customer_id` = ? AND `folder_id` IN ("+in+") GROUP BY `folder_id`", args...)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("count threads per folder: %w", err)
+	}
+
+	defaultID, err := s.DefaultFolderID(ctx, customerID, mailboxID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range folders {
+		folders[i].UnreadCount = counts[folders[i].FolderID]
+		folders[i].IsDefault = folders[i].FolderID == defaultID
+	}
+	return folders, nil
+}
+
+// ListThreads returns the threads in a folder, most recently updated first.
+func (s *Service) ListThreads(ctx context.Context, customerID, folderID int64, search string) ([]Thread, error) {
+	var rows *sql.Rows
+	var err error
+	if search != "" {
+		rows, err = s.db.QueryContext(ctx,
+			"SELECT `thread`.`id`, `thread`.`g_thread_id`, `g_thread`.`subject_line`, "+
+				"`g_thread`.`body_summary`, `g_thread`.`updated_at` FROM `thread` "+
+				"LEFT JOIN `g_thread` ON `thread`.`g_thread_id` = `g_thread`.`id` "+
+				"LEFT JOIN `g_message` ON `g_thread`.`id` = `g_message`.`g_thread_id` "+
+				"WHERE `thread`.`customer_id` = ? AND `thread`.`deleted_at` IS NULL AND `folder_id` = ? AND "+
+				"(MATCH(`subject_line`) AGAINST (? IN BOOLEAN MODE) "+
+				"OR MATCH(`body`) AGAINST (? IN BOOLEAN MODE) "+
+				"OR MATCH(`sender_name`) AGAINST (? IN BOOLEAN MODE)) "+
+				"GROUP BY `g_thread`.`id` ORDER BY `updated_at` DESC",
+			customerID, folderID, search, search, search)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			"SELECT `thread`.`id`, `thread`.`g_thread_id`, `g_thread`.`subject_line`, "+
+				"`g_thread`.`body_summary`, `g_thread`.`updated_at` FROM `thread` "+
+				"LEFT JOIN `g_thread` ON `thread`.`g_thread_id` = `g_thread`.`id` "+
+				"WHERE `customer_id` = ? AND `deleted_at` IS NULL AND `folder_id` = ? "+
+				"ORDER BY `updated_at` DESC",
+			customerID, folderID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list threads: %w", err)
+	}
+	defer rows.Close()
+
+	var threads []Thread
+	var threadIDs, gThreadIDs []int64
+	gThreadByThread := map[int64]int64{}
+	for rows.Next() {
+		var t Thread
+		var gThreadID int64
+		var updated sql.NullTime
+		if err := rows.Scan(&t.ThreadID, &gThreadID, &t.Subject, &t.Summary, &updated); err != nil {
+			return nil, fmt.Errorf("scan thread: %w", err)
+		}
+		if updated.Valid {
+			t.UpdatedAt = rfc3339(updated.Time)
+		}
+		t.Subscribers = []Party{}
+		threads = append(threads, t)
+		threadIDs = append(threadIDs, t.ThreadID)
+		gThreadIDs = append(gThreadIDs, gThreadID)
+		gThreadByThread[t.ThreadID] = gThreadID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list threads: %w", err)
+	}
+	if len(threads) == 0 {
+		return []Thread{}, nil
+	}
+
+	counts, err := s.threadMessageCounts(ctx, customerID, threadIDs, search)
+	if err != nil {
+		return nil, err
+	}
+
+	inT := store.Placeholders(len(threadIDs))
+	attachmentCounts, err := store.SelectCounts(ctx, s.db,
+		"SELECT `thread_id`, COUNT(`attachment`.`id`) FROM `attachment` "+
+			"LEFT JOIN `message` ON `message`.`id` = `attachment`.`message_id` "+
+			"WHERE `attachment`.`customer_id` = ? AND `attachment`.`deleted_at` IS NULL "+
+			"AND `thread_id` IN ("+inT+") GROUP BY `thread_id`",
+		append([]any{customerID}, store.Args(threadIDs)...)...)
+	if err != nil {
+		return nil, fmt.Errorf("count thread attachments: %w", err)
+	}
+
+	subscribers, err := s.subscribersByThread(ctx, customerID, gThreadIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range threads {
+		threads[i].UnreadCount = counts[threads[i].ThreadID]
+		threads[i].AttachmentCount = attachmentCounts[threads[i].ThreadID]
+		if subs := subscribers[gThreadByThread[threads[i].ThreadID]]; subs != nil {
+			threads[i].Subscribers = subs
+		}
+	}
+	return threads, nil
+}
+
+func (s *Service) threadMessageCounts(ctx context.Context, customerID int64, threadIDs []int64, search string) (map[int64]int64, error) {
+	in := store.Placeholders(len(threadIDs))
+	if search != "" {
+		args := append([]any{customerID}, store.Args(threadIDs)...)
+		args = append(args, search, search)
+		counts, err := store.SelectCounts(ctx, s.db,
+			"SELECT `thread_id`, COUNT(`message`.`id`) FROM `message` "+
+				"LEFT JOIN `g_message` ON `g_message`.`id` = `message`.`g_message_id` "+
+				"WHERE `customer_id` = ? AND `thread_id` IN ("+in+") AND "+
+				"(MATCH(`body`) AGAINST (? IN BOOLEAN MODE) "+
+				"OR MATCH(`sender_name`) AGAINST (? IN BOOLEAN MODE)) "+
+				"GROUP BY `thread_id`", args...)
+		if err != nil {
+			return nil, fmt.Errorf("count matching messages per thread: %w", err)
+		}
+		return counts, nil
+	}
+	counts, err := store.SelectCounts(ctx, s.db,
+		"SELECT `thread_id`, COUNT(`id`) - COUNT(`read_at`) FROM `message` "+
+			"WHERE `customer_id` = ? AND `thread_id` IN ("+in+") GROUP BY `thread_id`",
+		append([]any{customerID}, store.Args(threadIDs)...)...)
+	if err != nil {
+		return nil, fmt.Errorf("count unread messages per thread: %w", err)
+	}
+	return counts, nil
+}
+
+// subscribersByThread returns the subscribers of each canonical thread, with
+// the customer's own alias addresses removed so a thread lists the other party
+// rather than the viewer.
+func (s *Service) subscribersByThread(ctx context.Context, customerID int64, gThreadIDs []int64) (map[int64][]Party, error) {
+	if len(gThreadIDs) == 0 {
+		return map[int64][]Party{}, nil
+	}
+	in := store.Placeholders(len(gThreadIDs))
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `g_subscription`.`g_thread_id`, `g_subscription`.`email`, `contact`.`name` "+
+			"FROM `g_subscription` "+
+			"LEFT JOIN `contact` ON `g_subscription`.`email` = `contact`.`email` "+
+			"AND `contact`.`customer_id` = ? "+
+			"WHERE `g_thread_id` IN ("+in+")",
+		append([]any{customerID}, store.Args(gThreadIDs)...)...)
+	if err != nil {
+		return nil, fmt.Errorf("list thread subscribers: %w", err)
+	}
+	defer rows.Close()
+
+	aliases, err := s.aliasSet(ctx, customerID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[int64][]Party{}
+	for rows.Next() {
+		var gThreadID int64
+		var email string
+		var name sql.NullString
+		if err := rows.Scan(&gThreadID, &email, &name); err != nil {
+			return nil, fmt.Errorf("scan subscriber: %w", err)
+		}
+		if aliases[email] {
+			continue
+		}
+		out[gThreadID] = append(out[gThreadID], Party{Email: email, Name: name.String})
+	}
+	return out, rows.Err()
+}
+
+func (s *Service) aliasSet(ctx context.Context, customerID int64) (map[string]bool, error) {
+	emails, err := store.SelectStrings(ctx, s.db,
+		"SELECT `email` FROM `alias` WHERE `customer_id` = ?", customerID)
+	if err != nil {
+		return nil, fmt.Errorf("list aliases: %w", err)
+	}
+	set := make(map[string]bool, len(emails))
+	for _, e := range emails {
+		set[e] = true
+	}
+	return set, nil
+}
+
+// ListMessages returns the messages of a thread, newest first.
+func (s *Service) ListMessages(ctx context.Context, customerID, threadID int64, search string) ([]Message, error) {
+	var rows *sql.Rows
+	var err error
+	if search != "" {
+		rows, err = s.db.QueryContext(ctx,
+			"SELECT `message`.`id`, `message`.`read_at`, `g_message`.`id`, `g_message`.`sender_email`, "+
+				"`g_message`.`sender_name`, `g_message`.`body`, `g_message`.`sent_at` FROM `message` "+
+				"LEFT JOIN `g_message` ON `message`.`g_message_id` = `g_message`.`id` "+
+				"WHERE `customer_id` = ? AND `thread_id` = ? AND "+
+				"(MATCH(`body`) AGAINST (? IN BOOLEAN MODE) "+
+				"OR MATCH(`sender_name`) AGAINST (? IN BOOLEAN MODE)) "+
+				"ORDER BY `message`.`id` DESC",
+			customerID, threadID, search, search)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			"SELECT `message`.`id`, `message`.`read_at`, `g_message`.`id`, `g_message`.`sender_email`, "+
+				"`g_message`.`sender_name`, `g_message`.`body`, `g_message`.`sent_at` FROM `message` "+
+				"LEFT JOIN `g_message` ON `message`.`g_message_id` = `g_message`.`id` "+
+				"WHERE `customer_id` = ? AND `message`.`deleted_at` IS NULL AND `thread_id` = ? "+
+				"ORDER BY `message`.`id` DESC",
+			customerID, threadID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list messages: %w", err)
+	}
+	defer rows.Close()
+
+	var messages []Message
+	var messageIDs []int64
+	for rows.Next() {
+		var m Message
+		var gMessageID int64
+		var readAt, sentAt sql.NullTime
+		if err := rows.Scan(&m.MessageID, &readAt, &gMessageID, &m.SenderEmail,
+			&m.SenderName, &m.Body, &sentAt); err != nil {
+			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		m.ReadAt = rfc3339Ptr(readAt)
+		if sentAt.Valid {
+			m.SentAt = rfc3339(sentAt.Time)
+		}
+		m.Recipients = []Party{}
+		m.Attachments = []AttachmentRef{}
+		messages = append(messages, m)
+		messageIDs = append(messageIDs, m.MessageID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list messages: %w", err)
+	}
+	if len(messages) == 0 {
+		return []Message{}, nil
+	}
+
+	gThreadID, err := store.SelectInt(ctx, s.db,
+		"SELECT `g_thread_id` FROM `thread` WHERE `customer_id` = ? AND `deleted_at` IS NULL AND `id` = ? LIMIT 1",
+		customerID, threadID)
+	if err != nil {
+		return nil, fmt.Errorf("look up thread: %w", err)
+	}
+
+	// Contact names the viewing customer has for the people in this thread.
+	names, err := store.SelectPairs(ctx, s.db,
+		"SELECT `g_subscription`.`email`, `contact`.`name` FROM `g_subscription` "+
+			"LEFT JOIN `contact` ON `g_subscription`.`email` = `contact`.`email` "+
+			"AND `contact`.`customer_id` = ? WHERE `g_thread_id` = ?",
+		customerID, gThreadID)
+	if err != nil {
+		return nil, fmt.Errorf("list subscriber names: %w", err)
+	}
+
+	attachments, err := s.attachmentsByMessage(ctx, customerID, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range messages {
+		if name := names[messages[i].SenderEmail]; name != "" {
+			messages[i].SenderName = name
+		}
+		// Recipients are the subscribers other than the sender.
+		for email, name := range names {
+			if email == messages[i].SenderEmail {
+				continue
+			}
+			messages[i].Recipients = append(messages[i].Recipients, Party{Email: email, Name: name})
+		}
+		if refs := attachments[messages[i].MessageID]; refs != nil {
+			messages[i].Attachments = refs
+		}
+	}
+	return messages, nil
+}
+
+func (s *Service) attachmentsByMessage(ctx context.Context, customerID int64, messageIDs []int64) (map[int64][]AttachmentRef, error) {
+	in := store.Placeholders(len(messageIDs))
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `attachment`.`message_id`, `attachment`.`id`, `g_attachment`.`file_name`, "+
+			"`g_attachment`.`mime_type`, `g_attachment`.`file_size` FROM `attachment` "+
+			"LEFT JOIN `g_attachment` ON `g_attachment`.`id` = `attachment`.`g_attachment_id` "+
+			"WHERE `attachment`.`customer_id` = ? AND `attachment`.`deleted_at` IS NULL "+
+			"AND `attachment`.`message_id` IN ("+in+") ORDER BY `attachment`.`id`",
+		append([]any{customerID}, store.Args(messageIDs)...)...)
+	if err != nil {
+		return nil, fmt.Errorf("list attachments: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[int64][]AttachmentRef{}
+	for rows.Next() {
+		var messageID int64
+		var a AttachmentRef
+		if err := rows.Scan(&messageID, &a.AttachmentID, &a.FileName, &a.MimeType, &a.FileSize); err != nil {
+			return nil, fmt.Errorf("scan attachment: %w", err)
+		}
+		out[messageID] = append(out[messageID], a)
+	}
+	return out, rows.Err()
+}
+
+// GetAttachment returns an attachment with its bytes and marks it read.
+func (s *Service) GetAttachment(ctx context.Context, customerID, attachmentID int64) (*AttachmentData, error) {
+	var a AttachmentData
+	var hash string
+	err := s.db.QueryRowContext(ctx,
+		"SELECT `g_attachment`.`file_name`, `g_attachment`.`mime_type`, `g_attachment`.`file_size`, "+
+			"`g_attachment`.`hash_md5` FROM `attachment` "+
+			"LEFT JOIN `g_attachment` ON `g_attachment`.`id` = `attachment`.`g_attachment_id` "+
+			"WHERE `attachment`.`customer_id` = ? AND `attachment`.`deleted_at` IS NULL "+
+			"AND `attachment`.`id` = ? LIMIT 1",
+		customerID, attachmentID).Scan(&a.FileName, &a.MimeType, &a.FileSize, &hash)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("look up attachment: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE `attachment` SET `read_at` = NOW() WHERE `customer_id` = ? AND `deleted_at` IS NULL AND `id` = ?",
+		customerID, attachmentID); err != nil {
+		return nil, fmt.Errorf("mark attachment read: %w", err)
+	}
+	data, err := s.blob.Get(hash)
+	if err != nil {
+		return nil, err
+	}
+	a.FileData = data
+	return &a, nil
+}
+
+// DeleteAttachment soft-deletes the customer's projection of an attachment.
+func (s *Service) DeleteAttachment(ctx context.Context, customerID, attachmentID int64) (bool, error) {
+	n, err := store.Affected(ctx, s.db,
+		"UPDATE `attachment` SET `deleted_at` = NOW() "+
+			"WHERE `customer_id` = ? AND `deleted_at` IS NULL AND `id` = ? LIMIT 1",
+		customerID, attachmentID)
+	if err != nil {
+		return false, fmt.Errorf("delete attachment: %w", err)
+	}
+	return n > 0, nil
+}
+
+// ListContacts returns the customer's address book.
+func (s *Service) ListContacts(ctx context.Context, customerID int64, search string) ([]Contact, error) {
+	var rows *sql.Rows
+	var err error
+	if search != "" {
+		rows, err = s.db.QueryContext(ctx,
+			"SELECT `id`, `email`, `name` FROM `contact` WHERE `customer_id` = ? AND `deleted_at` IS NULL AND "+
+				"(MATCH(`name`) AGAINST (? IN BOOLEAN MODE) OR MATCH(`email`) AGAINST (? IN BOOLEAN MODE)) "+
+				"ORDER BY `id`", customerID, search, search)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			"SELECT `id`, `email`, `name` FROM `contact` WHERE `customer_id` = ? AND `deleted_at` IS NULL ORDER BY `id`",
+			customerID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list contacts: %w", err)
+	}
+	defer rows.Close()
+
+	contacts := []Contact{}
+	for rows.Next() {
+		var c Contact
+		if err := rows.Scan(&c.ContactID, &c.Email, &c.Name); err != nil {
+			return nil, fmt.Errorf("scan contact: %w", err)
+		}
+		contacts = append(contacts, c)
+	}
+	return contacts, rows.Err()
+}
+
+// AddContact creates a contact, returning the existing id when the address is
+// already known.
+func (s *Service) AddContact(ctx context.Context, customerID int64, email, name string) (int64, error) {
+	id, err := store.SelectInt(ctx, s.db,
+		"SELECT `id` FROM `contact` WHERE `customer_id` = ? AND `email` = ? LIMIT 1", customerID, email)
+	if err != nil {
+		return 0, fmt.Errorf("look up contact: %w", err)
+	}
+	if id != 0 {
+		return id, nil
+	}
+	id, err = store.Insert(ctx, s.db,
+		"INSERT INTO `contact` (`customer_id`, `email`, `name`) VALUES (?,?,?)", customerID, email, name)
+	if err != nil {
+		return 0, fmt.Errorf("create contact: %w", err)
+	}
+	return id, nil
+}
+
+// EditContact updates an address or name. It refuses an address already used by
+// a different contact.
+func (s *Service) EditContact(ctx context.Context, customerID, contactID int64, email, name string) (bool, error) {
+	if email != "" {
+		other, err := store.SelectInt(ctx, s.db,
+			"SELECT `id` FROM `contact` WHERE `customer_id` = ? AND `email` = ? LIMIT 1", customerID, email)
+		if err != nil {
+			return false, fmt.Errorf("look up contact: %w", err)
+		}
+		if other != 0 && other != contactID {
+			return false, nil
+		}
+		if _, err := s.db.ExecContext(ctx,
+			"UPDATE `contact` SET `email` = ? WHERE `customer_id` = ? AND `id` = ?",
+			email, customerID, contactID); err != nil {
+			return false, fmt.Errorf("update contact email: %w", err)
+		}
+	}
+	if name != "" {
+		if _, err := s.db.ExecContext(ctx,
+			"UPDATE `contact` SET `name` = ? WHERE `customer_id` = ? AND `id` = ?",
+			name, customerID, contactID); err != nil {
+			return false, fmt.Errorf("update contact name: %w", err)
+		}
+	}
+	return true, nil
+}
+
+// DeleteContact soft-deletes a contact.
+func (s *Service) DeleteContact(ctx context.Context, customerID, contactID int64) (bool, error) {
+	n, err := store.Affected(ctx, s.db,
+		"UPDATE `contact` SET `deleted_at` = NOW() WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
+		customerID, contactID)
+	if err != nil {
+		return false, fmt.Errorf("delete contact: %w", err)
+	}
+	return n > 0, nil
+}
+
+// MarkThreadRead marks a thread and all its messages read for one customer.
+func (s *Service) MarkThreadRead(ctx context.Context, q store.Queryer, customerID, threadID int64) error {
+	if _, err := q.ExecContext(ctx,
+		"UPDATE `message` SET `read_at` = NOW() WHERE `customer_id` = ? AND `thread_id` = ? AND `read_at` IS NULL",
+		customerID, threadID); err != nil {
+		return fmt.Errorf("mark messages read: %w", err)
+	}
+	if _, err := q.ExecContext(ctx,
+		"UPDATE `thread` SET `read_at` = NOW() WHERE `customer_id` = ? AND `id` = ? AND `read_at` IS NULL",
+		customerID, threadID); err != nil {
+		return fmt.Errorf("mark thread read: %w", err)
+	}
+	return nil
+}
+
+// MarkMessageRead marks one message, and its thread, read.
+func (s *Service) MarkMessageRead(ctx context.Context, customerID, messageID int64) (bool, error) {
+	threadID, err := store.SelectInt(ctx, s.db,
+		"SELECT `thread_id` FROM `message` WHERE `customer_id` = ? AND `id` = ? LIMIT 1", customerID, messageID)
+	if err != nil {
+		return false, fmt.Errorf("look up message: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE `message` SET `read_at` = NOW() WHERE `customer_id` = ? AND `id` = ?",
+		customerID, messageID); err != nil {
+		return false, fmt.Errorf("mark message read: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE `thread` SET `read_at` = NOW() WHERE `customer_id` = ? AND `id` = ?",
+		customerID, threadID); err != nil {
+		return false, fmt.Errorf("mark thread read: %w", err)
+	}
+	return true, nil
+}
+
+// EditThread moves a thread to another of the customer's folders.
+func (s *Service) EditThread(ctx context.Context, customerID, threadID, folderID int64) (bool, error) {
+	if folderID == 0 {
+		return true, nil
+	}
+	found, err := store.SelectInt(ctx, s.db,
+		"SELECT `id` FROM `folder` WHERE `customer_id` = ? AND `id` = ?", customerID, folderID)
+	if err != nil {
+		return false, fmt.Errorf("look up folder: %w", err)
+	}
+	if found == 0 {
+		return false, nil
+	}
+	n, err := store.Affected(ctx, s.db,
+		"UPDATE `thread` SET `folder_id` = ? WHERE `customer_id` = ? AND `id` = ?",
+		folderID, customerID, threadID)
+	if err != nil {
+		return false, fmt.Errorf("move thread: %w", err)
+	}
+	return n > 0, nil
+}
+
+// DeleteThread soft-deletes a thread and its messages and attachments for one
+// customer. The canonical content is untouched.
+func (s *Service) DeleteThread(ctx context.Context, customerID, threadID int64) (bool, error) {
+	var deleted bool
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		n, err := store.Affected(ctx, tx,
+			"UPDATE `thread` SET `deleted_at` = NOW() "+
+				"WHERE `customer_id` = ? AND `deleted_at` IS NULL AND `id` = ? LIMIT 1",
+			customerID, threadID)
+		if err != nil {
+			return fmt.Errorf("delete thread: %w", err)
+		}
+		if n == 0 {
+			return nil
+		}
+		deleted = true
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE `message` SET `deleted_at` = NOW() "+
+				"WHERE `customer_id` = ? AND `thread_id` = ? AND `deleted_at` IS NULL",
+			customerID, threadID); err != nil {
+			return fmt.Errorf("delete thread messages: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE `attachment` SET `deleted_at` = NOW() WHERE `deleted_at` IS NULL AND `message_id` IN "+
+				"(SELECT `id` FROM `message` WHERE `customer_id` = ? AND `thread_id` = ?)",
+			customerID, threadID); err != nil {
+			return fmt.Errorf("delete thread attachments: %w", err)
+		}
+		return nil
+	})
+	return deleted, err
+}
+
+// AddFolder creates a folder, making it the default when it is the mailbox's
+// first.
+func (s *Service) AddFolder(ctx context.Context, customerID, mailboxID int64, name string) (int64, error) {
+	var folderID int64
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		folderID, err = store.Insert(ctx, tx,
+			"INSERT INTO `folder` (`customer_id`, `mailbox_id`, `name`) VALUES (?,?,?)",
+			customerID, mailboxID, name)
+		if err != nil {
+			return fmt.Errorf("create folder: %w", err)
+		}
+		count, err := store.SelectInt(ctx, tx,
+			"SELECT COUNT(`id`) FROM `folder` WHERE `customer_id` = ? AND `mailbox_id` = ?",
+			customerID, mailboxID)
+		if err != nil {
+			return fmt.Errorf("count folders: %w", err)
+		}
+		if count == 1 {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE `mailbox` SET `default_folder_id` = ? WHERE `customer_id` = ? AND `id` = ?",
+				folderID, customerID, mailboxID); err != nil {
+				return fmt.Errorf("set default folder: %w", err)
+			}
+		}
+		return nil
+	})
+	return folderID, err
+}
+
+// EditFolder renames a folder and optionally makes it the mailbox default.
+func (s *Service) EditFolder(ctx context.Context, customerID, folderID int64, name string, isDefault bool) (bool, error) {
+	if name != "" {
+		if _, err := s.db.ExecContext(ctx,
+			"UPDATE `folder` SET `name` = ? WHERE `customer_id` = ? AND `id` = ?",
+			name, customerID, folderID); err != nil {
+			return false, fmt.Errorf("rename folder: %w", err)
+		}
+	}
+	if isDefault {
+		mailboxID, err := s.MailboxIDForFolder(ctx, customerID, folderID)
+		if err != nil {
+			return false, err
+		}
+		if _, err := s.db.ExecContext(ctx,
+			"UPDATE `mailbox` SET `default_folder_id` = ? WHERE `customer_id` = ? AND `id` = ?",
+			folderID, customerID, mailboxID); err != nil {
+			return false, fmt.Errorf("set default folder: %w", err)
+		}
+	}
+	return true, nil
+}
+
+// DeleteFolder removes a folder, moving its threads to the mailbox default. The
+// default folder itself cannot be deleted.
+func (s *Service) DeleteFolder(ctx context.Context, customerID, folderID int64) (bool, error) {
+	mailboxID, err := s.MailboxIDForFolder(ctx, customerID, folderID)
+	if err != nil {
+		return false, err
+	}
+	defaultFolderID, err := s.DefaultFolderID(ctx, customerID, mailboxID)
+	if err != nil {
+		return false, err
+	}
+	if defaultFolderID == folderID {
+		return false, nil
+	}
+	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE `thread` SET `folder_id` = ? WHERE `customer_id` = ? AND `folder_id` = ?",
+			defaultFolderID, customerID, folderID); err != nil {
+			return fmt.Errorf("move threads out of folder: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM `folder` WHERE `customer_id` = ? AND `id` = ?",
+			customerID, folderID); err != nil {
+			return fmt.Errorf("delete folder: %w", err)
+		}
+		return nil
+	})
+	return err == nil, err
+}
+
+// DefaultDomain returns the domain used for generated aliases.
+func (s *Service) DefaultDomain(ctx context.Context, q store.Queryer) (string, error) {
+	return store.SelectString(ctx, q,
+		"SELECT `name` FROM `domain` WHERE `customer_id` IS NULL LIMIT 1")
+}
+
+// AddMailbox creates a mailbox with an Inbox, a generated alias on the default
+// domain and the given sending identity.
+func (s *Service) AddMailbox(ctx context.Context, customerID int64, name, color, senderEmail, senderName string) (int64, error) {
+	var mailboxID int64
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		mailboxID, err = addMailboxTx(ctx, tx, customerID, name, color, senderEmail, senderName)
+		return err
+	})
+	return mailboxID, err
+}
+
+func addMailboxTx(ctx context.Context, tx *sql.Tx, customerID int64, name, color, senderEmail, senderName string) (int64, error) {
+	domain, err := store.SelectString(ctx, tx,
+		"SELECT `name` FROM `domain` WHERE `customer_id` IS NULL LIMIT 1")
+	if err != nil {
+		return 0, fmt.Errorf("look up default domain: %w", err)
+	}
+	if domain == "" {
+		// Without a domain there is no address to generate, so the mailbox
+		// would be unusable.
+		return 0, nil
+	}
+	mailboxID, err := store.Insert(ctx, tx,
+		"INSERT INTO `mailbox` (`customer_id`, `name`, `color`) VALUES (?,?,?)", customerID, name, color)
+	if err != nil {
+		return 0, fmt.Errorf("create mailbox: %w", err)
+	}
+	folderID, err := store.Insert(ctx, tx,
+		"INSERT INTO `folder` (`customer_id`, `mailbox_id`, `name`) VALUES (?,?,?)",
+		customerID, mailboxID, "Inbox")
+	if err != nil {
+		return 0, fmt.Errorf("create inbox: %w", err)
+	}
+	generated, err := generatedAddress(domain)
+	if err != nil {
+		return 0, err
+	}
+	aliasID, err := store.Insert(ctx, tx,
+		"INSERT INTO `alias` (`customer_id`, `email`, `name`, `mailbox_id`) VALUES (?,?,?,?)",
+		customerID, generated, senderName, mailboxID)
+	if err != nil {
+		return 0, fmt.Errorf("create alias: %w", err)
+	}
+	if senderEmail != "" {
+		existing, err := store.SelectInt(ctx, tx,
+			"SELECT `id` FROM `alias` WHERE `email` = ? AND `name` = ? LIMIT 1", senderEmail, senderName)
+		if err != nil {
+			return 0, fmt.Errorf("look up sender alias: %w", err)
+		}
+		if existing == 0 {
+			if _, err := store.Insert(ctx, tx,
+				"INSERT INTO `alias` (`customer_id`, `email`, `name`, `mailbox_id`) VALUES (?,?,?,?)",
+				customerID, senderEmail, senderName, mailboxID); err != nil {
+				return 0, fmt.Errorf("create sender alias: %w", err)
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE `mailbox` SET `default_folder_id` = ?, `default_alias_id` = ? WHERE `id` = ?",
+		folderID, aliasID, mailboxID); err != nil {
+		return 0, fmt.Errorf("set mailbox defaults: %w", err)
+	}
+	count, err := store.SelectInt(ctx, tx,
+		"SELECT COUNT(`id`) FROM `mailbox` WHERE `customer_id` = ?", customerID)
+	if err != nil {
+		return 0, fmt.Errorf("count mailboxes: %w", err)
+	}
+	if count == 1 {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE `customer` SET `default_mailbox_id` = ? WHERE `id` = ?", mailboxID, customerID); err != nil {
+			return 0, fmt.Errorf("set default mailbox: %w", err)
+		}
+	}
+	return mailboxID, nil
+}
+
+// generatedAddress returns a random 7-digit local part on the given domain,
+// matching the addresses the PHP backend generates.
+func generatedAddress(domain string) (string, error) {
+	const min = 1000 * 1000
+	n, err := crand.Int(crand.Reader, big.NewInt(min*10-1-min))
+	if err != nil {
+		return "", fmt.Errorf("generate address: %w", err)
+	}
+	return fmt.Sprintf("%d@%s", n.Int64()+min, domain), nil
+}
+
+// EditMailbox updates a mailbox's name, colour, default and shared flags, and
+// sending identity.
+func (s *Service) EditMailbox(ctx context.Context, customerID, userID, mailboxID int64,
+	name, color string, isDefault, isShared *bool, senderEmail, senderName string) (bool, error) {
+	return true, s.db.Tx(ctx, func(tx *sql.Tx) error {
+		if name != "" {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE `mailbox` SET `name` = ?, `color` = ? WHERE `customer_id` = ? AND `id` = ?",
+				name, color, customerID, mailboxID); err != nil {
+				return fmt.Errorf("rename mailbox: %w", err)
+			}
+		}
+		if isDefault != nil && *isDefault {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE `customer` SET `default_mailbox_id` = ? WHERE `id` = ?",
+				mailboxID, customerID); err != nil {
+				return fmt.Errorf("set default mailbox: %w", err)
+			}
+		}
+		if isShared != nil {
+			// The PHP writes `WHERE id = customerId` here, which edits the
+			// wrong row. The mailbox being edited is the intended target.
+			if *isShared {
+				if _, err := tx.ExecContext(ctx,
+					"UPDATE `mailbox` SET `user_id` = NULL WHERE `customer_id` = ? AND `id` = ?",
+					customerID, mailboxID); err != nil {
+					return fmt.Errorf("share mailbox: %w", err)
+				}
+			} else {
+				if _, err := tx.ExecContext(ctx,
+					"UPDATE `mailbox` SET `user_id` = ? WHERE `customer_id` = ? AND `id` = ?",
+					userID, customerID, mailboxID); err != nil {
+					return fmt.Errorf("unshare mailbox: %w", err)
+				}
+			}
+		}
+		if senderEmail != "" {
+			aliasID, err := store.SelectInt(ctx, tx,
+				"SELECT `id` FROM `alias` WHERE `customer_id` = ? AND `email` = ? LIMIT 1",
+				customerID, senderEmail)
+			if err != nil {
+				return fmt.Errorf("look up alias: %w", err)
+			}
+			if aliasID == 0 {
+				aliasID, err = store.Insert(ctx, tx,
+					"INSERT INTO `alias` (`customer_id`, `email`, `name`, `mailbox_id`) VALUES (?,?,?,?)",
+					customerID, senderEmail, senderName, mailboxID)
+				if err != nil {
+					return fmt.Errorf("create alias: %w", err)
+				}
+			} else if _, err := tx.ExecContext(ctx,
+				"UPDATE `alias` SET `name` = ? WHERE `customer_id` = ? AND `id` = ? AND `name` <> ?",
+				senderName, customerID, aliasID, senderName); err != nil {
+				return fmt.Errorf("rename alias: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE `mailbox` SET `default_alias_id` = ? WHERE `customer_id` = ? AND `id` = ?",
+				aliasID, customerID, mailboxID); err != nil {
+				return fmt.Errorf("set default alias: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+// DeleteMailbox removes a mailbox, moving its aliases and folders to the
+// default mailbox. The default mailbox itself cannot be deleted.
+func (s *Service) DeleteMailbox(ctx context.Context, customerID, mailboxID int64) (bool, error) {
+	defaultMailboxID, err := s.DefaultMailboxID(ctx, customerID)
+	if err != nil {
+		return false, err
+	}
+	if defaultMailboxID == mailboxID {
+		return false, nil
+	}
+	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE `alias` SET `mailbox_id` = ? WHERE `customer_id` = ? AND `mailbox_id` = ?",
+			defaultMailboxID, customerID, mailboxID); err != nil {
+			return fmt.Errorf("move aliases: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE `folder` SET `mailbox_id` = ? WHERE `customer_id` = ? AND `mailbox_id` = ?",
+			defaultMailboxID, customerID, mailboxID); err != nil {
+			return fmt.Errorf("move folders: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM `mailbox` WHERE `customer_id` = ? AND `id` = ?",
+			customerID, mailboxID); err != nil {
+			return fmt.Errorf("delete mailbox: %w", err)
+		}
+		return nil
+	})
+	return err == nil, err
+}

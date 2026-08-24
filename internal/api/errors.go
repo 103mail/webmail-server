@@ -1,0 +1,19 @@
+package api
+
+import (
+	"errors"
+	"strings"
+
+	"github.com/mevdschee/webmail-server/internal/rrule"
+)
+
+// isBadInput reports whether an error is the caller's fault rather than the
+// server's, so the handler can answer 400 instead of 500.
+func isBadInput(err error) bool {
+	var unsupported *rrule.ErrUnsupported
+	if errors.As(err, &unsupported) {
+		return true
+	}
+	// rrule.Parse reports malformed values as plain errors.
+	return strings.Contains(err.Error(), "parse repeat rule")
+}
