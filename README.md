@@ -38,10 +38,8 @@ token, which `POST /api/v1/auth/token` issues from an email and password.
 | `chat` | `chat`, `participant`, `message`, `attachment`, `presence`, `typing` |
 
 A `GET` reads its parameters from the query string; other methods accept a JSON
-or form-encoded body. `GET /health` needs no token.
-
-Note that `email/attachment` is implemented and matches the PHP, but is absent
-from `email.yaml`. The specification is incomplete there, not the server.
+or form-encoded body. Attachments are nested objects, so a request carrying them
+has to be JSON. `GET /health` needs no token.
 
 ## Database
 
