@@ -225,8 +225,18 @@ func (s *Server) handleEmail(w http.ResponseWriter, r *http.Request, req *reques
 			}
 			return out, http.StatusOK
 		case http.MethodDelete:
+			// Unlike the other deletes, which report a miss as false, an
+			// attachment that is gone is a 404. The PHP looks the row up
+			// before it acts on it and answers the same way.
 			out, err := s.email.DeleteAttachment(ctx, customerID, attachmentID)
-			return s.result(w, r, out, err)
+			if err != nil {
+				s.fail(w, r, err)
+				return nil, 0
+			}
+			if !out {
+				return nil, http.StatusNotFound
+			}
+			return out, http.StatusOK
 		}
 		return nil, http.StatusMethodNotAllowed
 
