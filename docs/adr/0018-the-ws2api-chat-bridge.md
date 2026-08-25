@@ -92,11 +92,10 @@ Server to client:
 The message payload is the same shape `GET /api/v1/chat/message/{chatId}`
 returns, so the client has one representation of a chat message rather than two.
 
-Two consequences of the transport worth stating. A response to a client frame
-goes back on that client's own socket, so it is a reply and not a broadcast;
-the fan-out to the other participants is a separate push. And the proxy writes
-the POST response to the socket unconditionally, so a handler with nothing to
-say must answer with an empty body, and the client ignores empty frames.
+One consequence of the transport is worth stating: a response to a client frame
+goes back on that client's own socket, so it is a reply and not a broadcast, and
+the fan-out to the other participants is a separate push. A handler with nothing
+to say answers with an empty body, which the proxy turns into no frame at all.
 
 ### Fan-out is N posts, and that is the price
 
@@ -136,18 +135,29 @@ is an optimisation that makes the common case immediate, not the mechanism.
 - The client needs a reconnect policy. It backs off and re-mints a session,
   because a ClientId is not reusable across connections.
 
-### The wart
+### What building this changed in ws2api
 
-`../ws2api` hardcodes both its listen port and the API URL it calls in `main`:
+The proxy hardcoded its listen port and the API URL in `main`, and `localhost`
+inside a container is the container, so it could not reach the API at all. It
+now takes both as flags with environment fallbacks, and `deploy/` configures it
+rather than patching it.
 
-```go
-log.Panic(http.ListenAndServe(":7001", getWsHandler("http://localhost:8000/wsoverhttp/")))
-```
+Three defects surfaced while building against it, all now fixed upstream with
+tests that fail without the fix:
 
-`localhost` inside the proxy container is the proxy, so this cannot reach the
-API as it stands. `deploy/ws2api.Dockerfile` patches both literals at build time
-from build arguments. That is a deployment hack standing in for two flags the
-proxy should take, and it is the first thing to remove if that repo grows them.
+- **A duplicate ClientId unregistered the live connection.** A second upgrade
+  claiming a connected id stored over the first; when the first closed, it
+  deleted the map entry now pointing at the second, and that socket stopped
+  receiving pushes with nothing in the logs. A duplicate is refused now.
+- **An empty API response was written as an empty frame.** The protocol says an
+  empty response sends nothing. This client was filtering empty frames out to
+  compensate; it no longer has to.
+- **A failed API call had its body forwarded to the client.** A 500 put
+  `internal server error` on the socket looking like an ordinary chat frame.
+
+That last one is why this bridge answers a refusal with an `error` frame rather
+than an HTTP status: anything non-200 was, at the time, reaching the browser as
+though the server had said it.
 
 ### Alternatives rejected
 

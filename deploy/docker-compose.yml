@@ -143,6 +143,9 @@ services:
       dockerfile: ../webmail-server/deploy/ws2api.Dockerfile
     image: ws2api:local
     restart: unless-stopped
+    environment:
+      WS2API_LISTEN: ":7001"
+      WS2API_URL: http://api:8080/wsoverhttp/
     depends_on:
       api-103mail:
         condition: service_healthy
@@ -233,6 +236,9 @@ services:
       dockerfile: ../webmail-server/deploy/ws2api.Dockerfile
     image: ws2api:local
     restart: unless-stopped
+    environment:
+      WS2API_LISTEN: ":7001"
+      WS2API_URL: http://api:8080/wsoverhttp/
     depends_on:
       api-example:
         condition: service_healthy

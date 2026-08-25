@@ -117,6 +117,11 @@ typing indicator shows in the header while the other is writing.
 knowing a ClientId, which is safe for a proxy on the Domain's private network
 and would not be on the internet.
 
+The proxy exposes Prometheus metrics on its own port, reachable from inside the
+Domain network:
+
+    docker compose exec api-example wget -qO- http://ws:7001/
+
 ## Federation
 
 It works. Composing from `bob@example.com` to `mevdschee@103mail.com` writes the
