@@ -52,6 +52,11 @@ type Chat struct {
 	NotificationPreference string           `json:"notificationPreference"`
 	Participants           []ParticipantRef `json:"participants"`
 	CreatedAt              string           `json:"createdAt"`
+	// LastMessageAt is when the newest message in the chat was sent, or empty
+	// for a chat with none. A chat list sorts by recent activity, and creation
+	// time is not that: a long-running conversation would sink below one nobody
+	// has spoken in since it was opened.
+	LastMessageAt string `json:"lastMessageAt"`
 }
 
 // Participant is a chat member with presence and membership dates.
@@ -146,21 +151,26 @@ func (s *Service) ListChats(ctx context.Context, customerID, mailboxID int64, se
 	if search != "" {
 		rows, err = s.db.QueryContext(ctx,
 			"SELECT `chat`.`id`, `chat`.`g_chat_id`, `chat`.`muted`, `chat`.`notification_preference`, "+
-				"`g_chat`.`type`, `g_chat`.`name`, `g_chat`.`created_at` FROM `chat` "+
+				"`g_chat`.`type`, `g_chat`.`name`, `g_chat`.`created_at`, "+
+				"MAX(`g_chat_message`.`created_at`) FROM `chat` "+
 				"LEFT JOIN `g_chat` ON `chat`.`g_chat_id` = `g_chat`.`id` "+
 				"LEFT JOIN `g_chat_message` ON `g_chat`.`id` = `g_chat_message`.`g_chat_id` "+
 				"WHERE `chat`.`customer_id` = ? AND `chat`.`mailbox_id` = ? AND `chat`.`deleted_at` IS NULL AND "+
 				"(MATCH(`g_chat_message`.`body`) AGAINST (? IN BOOLEAN MODE) "+
 				"OR MATCH(`g_chat_message`.`sender_name`) AGAINST (? IN BOOLEAN MODE)) "+
-				"GROUP BY `g_chat`.`id` ORDER BY `g_chat`.`created_at` DESC",
+				"GROUP BY `g_chat`.`id` ORDER BY MAX(`g_chat_message`.`created_at`) DESC, "+
+				"`g_chat`.`created_at` DESC",
 			customerID, mailboxID, search, search)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
 			"SELECT `chat`.`id`, `chat`.`g_chat_id`, `chat`.`muted`, `chat`.`notification_preference`, "+
-				"`g_chat`.`type`, `g_chat`.`name`, `g_chat`.`created_at` FROM `chat` "+
+				"`g_chat`.`type`, `g_chat`.`name`, `g_chat`.`created_at`, "+
+				"MAX(`g_chat_message`.`created_at`) FROM `chat` "+
 				"LEFT JOIN `g_chat` ON `chat`.`g_chat_id` = `g_chat`.`id` "+
+				"LEFT JOIN `g_chat_message` ON `g_chat`.`id` = `g_chat_message`.`g_chat_id` "+
 				"WHERE `chat`.`customer_id` = ? AND `chat`.`mailbox_id` = ? AND `chat`.`deleted_at` IS NULL "+
-				"ORDER BY `g_chat`.`created_at` DESC",
+				"GROUP BY `g_chat`.`id` ORDER BY MAX(`g_chat_message`.`created_at`) DESC, "+
+				"`g_chat`.`created_at` DESC",
 			customerID, mailboxID)
 	}
 	if err != nil {
@@ -175,10 +185,13 @@ func (s *Service) ListChats(ctx context.Context, customerID, mailboxID int64, se
 		var c Chat
 		var gChatID int64
 		var name sql.NullString
-		var createdAt sql.NullTime
+		var createdAt, lastMessageAt sql.NullTime
 		if err := rows.Scan(&c.ChatID, &gChatID, &c.Muted, &c.NotificationPreference,
-			&c.Type, &name, &createdAt); err != nil {
+			&c.Type, &name, &createdAt, &lastMessageAt); err != nil {
 			return nil, fmt.Errorf("scan chat: %w", err)
+		}
+		if lastMessageAt.Valid {
+			c.LastMessageAt = rfc3339(lastMessageAt.Time)
 		}
 		if name.Valid {
 			v := name.String

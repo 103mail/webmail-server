@@ -78,6 +78,7 @@ services:
       WEBMAIL_DSN: webmail:webmail@tcp(db:3306)/webmail
       WEBMAIL_ALLOWED_ORIGINS: https://webmail.103mail.com
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
+      WEBMAIL_WS_PUSH_URL: http://ws:7001
     volumes:
       - ./data/103mail.com:/data
       - ./domain/103mail.com/federation.json:/etc/webmail/federation.json:ro
@@ -134,13 +135,17 @@ services:
       dom-103mail:
       federation:
 
+  # Chat WebSockets terminate here, not in the API, so the API tier stays
+  # stateless and a deploy does not drop every open socket (ADR 13, ADR 18).
   ws-103mail:
-    profiles: [chat-ws]
     build:
       context: ../../ws2api
       dockerfile: ../webmail-server/deploy/ws2api.Dockerfile
     image: ws2api:local
     restart: unless-stopped
+    depends_on:
+      api-103mail:
+        condition: service_healthy
     networks:
       dom-103mail:
         aliases: [ws]
@@ -163,6 +168,7 @@ services:
       WEBMAIL_DSN: webmail:webmail@tcp(db:3306)/webmail
       WEBMAIL_ALLOWED_ORIGINS: https://webmail.example.com
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
+      WEBMAIL_WS_PUSH_URL: http://ws:7001
     volumes:
       - ./data/example.com:/data
       - ./domain/example.com/federation.json:/etc/webmail/federation.json:ro
@@ -219,13 +225,17 @@ services:
       dom-example:
       federation:
 
+  # Chat WebSockets terminate here, not in the API, so the API tier stays
+  # stateless and a deploy does not drop every open socket (ADR 13, ADR 18).
   ws-example:
-    profiles: [chat-ws]
     build:
       context: ../../ws2api
       dockerfile: ../webmail-server/deploy/ws2api.Dockerfile
     image: ws2api:local
     restart: unless-stopped
+    depends_on:
+      api-example:
+        condition: service_healthy
     networks:
       dom-example:
         aliases: [ws]

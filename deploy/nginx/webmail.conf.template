@@ -52,6 +52,29 @@ server {
         proxy_read_timeout 60s;
     }
 
+    # Chat WebSockets. The path segment after /ws/ is the ClientId, which is
+    # what the proxy keys connections by; it is stripped here because the proxy
+    # expects it at the root. Note that /wsoverhttp/ is deliberately NOT
+    # proxied: it is authenticated only by knowing a ClientId and must stay
+    # inside the Domain network (ADR 18).
+    location /ws/ {
+        set $ws_upstream http://ws:7001;
+        rewrite ^/ws/(.*)$ /$1 break;
+        proxy_pass $ws_upstream;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       $host;
+        proxy_set_header X-Real-IP  $remote_addr;
+
+        # A chat connection is idle most of the time and must not be reaped for
+        # it. The client pings well inside this.
+        proxy_read_timeout  3600s;
+        proxy_send_timeout  3600s;
+        proxy_buffering off;
+    }
+
     location = /health {
         set $health_upstream http://api:8080;
         proxy_pass $health_upstream/health;

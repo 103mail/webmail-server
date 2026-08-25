@@ -23,6 +23,7 @@ import (
 	"github.com/mevdschee/webmail-server/internal/mailer"
 	"github.com/mevdschee/webmail-server/internal/notify"
 	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/mevdschee/webmail-server/internal/wsbridge"
 )
 
 func main() {
@@ -139,12 +140,18 @@ func run(log *slog.Logger) error {
 	mail := email.New(db, attachments, notifier, federator, log)
 	fed.Attach(mail)
 
+	chats := chat.New(db, attachments)
+
 	server := api.New(cfg, log,
 		auth.New(db),
 		mail,
 		calendar.New(db, documents),
-		chat.New(db, attachments),
+		chats,
 		receiver, verifier, fed,
+		// The chat WebSocket bridge. Connections terminate in ws2api, so this
+		// holds none of them; it answers the proxy's HTTP calls and pushes
+		// back through it. See ADR 13 and ADR 18.
+		wsbridge.New(chats, log),
 	)
 
 	httpServer := &http.Server{

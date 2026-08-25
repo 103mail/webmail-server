@@ -17,6 +17,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, req *request
 	search := req.str("search")
 
 	switch req.Entity {
+	case "session":
+		// Minting a ClientId is the one authenticated step of opening a socket.
+		// Everything after it is addressed by that opaque id, which is why it
+		// must never be a user id or a token (ADR 13, ADR 18).
+		if req.Method != http.MethodPost {
+			return nil, http.StatusMethodNotAllowed
+		}
+		out, err := s.chat.NewSession(ctx, customerID, userID)
+		return s.result(w, r, out, err)
+
 	case "chat":
 		id := parseID(req.ID)
 		if id == 0 {

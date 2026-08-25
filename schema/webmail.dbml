@@ -79,6 +79,28 @@ Table "chat" {
   }
 }
 
+// One WebSocket connection, addressed by an opaque ClientId (ADR 13, ADR 18).
+// The id is never a user id, a mailbox id or a bearer token, because it travels
+// in URL paths and proxy logs. It is minted by an authenticated request, claimed
+// once when the socket connects, and useless afterwards.
+Table "chat_session" {
+  "id" bigint(20) [pk, increment, not null]
+  "client_id" varchar(64) [unique, not null]
+  "customer_id" bigint(20) [not null]
+  "user_id" bigint(20) [not null]
+  "created_at" datetime [not null, default: 'current_timestamp()']
+  "expires_at" datetime [not null]
+  "connected_at" datetime
+  "last_seen_at" datetime
+  "closed_at" datetime
+
+  indexes {
+    ("user_id") [name: "user_id"]
+    ("customer_id") [name: "customer_id"]
+    ("closed_at") [name: "closed_at"]
+  }
+}
+
 Table "chat_message" {
   "id" bigint(20) [pk, increment, not null]
   "customer_id" bigint(20) [not null]

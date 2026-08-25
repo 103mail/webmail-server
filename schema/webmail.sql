@@ -85,6 +85,24 @@ CREATE TABLE `chat` (
   CONSTRAINT `chat_ibfk_4` FOREIGN KEY (`last_read_message_id`) REFERENCES `g_chat_message` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 DROP TABLE IF EXISTS `chat_message`;
+CREATE TABLE `chat_session` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `client_id` varchar(64) NOT NULL,
+  `customer_id` bigint(20) NOT NULL,
+  `user_id` bigint(20) NOT NULL,
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  `expires_at` datetime NOT NULL,
+  `connected_at` datetime DEFAULT NULL,
+  `last_seen_at` datetime DEFAULT NULL,
+  `closed_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `client_id` (`client_id`),
+  KEY `user_id` (`user_id`),
+  KEY `customer_id` (`customer_id`),
+  KEY `closed_at` (`closed_at`),
+  CONSTRAINT `chat_session_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 CREATE TABLE `chat_message` (
   `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `customer_id` bigint(20) NOT NULL,

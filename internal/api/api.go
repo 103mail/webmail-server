@@ -20,6 +20,7 @@ import (
 	"github.com/mevdschee/webmail-server/internal/email"
 	"github.com/mevdschee/webmail-server/internal/federation"
 	"github.com/mevdschee/webmail-server/internal/mailer"
+	"github.com/mevdschee/webmail-server/internal/wsbridge"
 )
 
 // Server routes API requests to the domain services.
@@ -40,13 +41,16 @@ type Server struct {
 	// well-known endpoint answers 404 and the inbound endpoint 503 rather than
 	// accepting envelopes there is no key to verify.
 	federation *federation.Service
+	// wsbridge is nil when chat has no WebSocket tier, in which case the
+	// endpoints ws2api calls answer 503 and the client falls back to reloading.
+	wsbridge *wsbridge.Service
 }
 
 // New returns a Server. receiver and verifier may be nil, which disables the
 // inbound mail webhook.
 func New(cfg *config.Config, log *slog.Logger, a *auth.Service, e *email.Service,
 	c *calendar.Service, ch *chat.Service, receiver *mailer.Receiver, verifier *mailer.Verifier,
-	fed *federation.Service) *Server {
+	fed *federation.Service, ws *wsbridge.Service) *Server {
 	origins := make(map[string]bool, len(cfg.AllowedOrigins))
 	for _, o := range cfg.AllowedOrigins {
 		if o != "" {
@@ -54,7 +58,7 @@ func New(cfg *config.Config, log *slog.Logger, a *auth.Service, e *email.Service
 		}
 	}
 	return &Server{cfg: cfg, log: log, auth: a, email: e, calendar: c, chat: ch,
-		origins: origins, receiver: receiver, verifier: verifier, federation: fed}
+		origins: origins, receiver: receiver, verifier: verifier, federation: fed, wsbridge: ws}
 }
 
 // Handler returns the root HTTP handler.
@@ -69,6 +73,10 @@ func (s *Server) Handler() http.Handler {
 	// definition, so neither goes through the bearer-token route wrapper.
 	mux.HandleFunc(federation.WellKnownPath, s.handleWellKnown)
 	mux.HandleFunc(federation.InboundPath, s.handleFederationInbound)
+	// The chat WebSocket bridge. Reachable only from inside the Domain network:
+	// it is authenticated by knowing a ClientId, which the reverse proxy must
+	// never expose. See ADR 18.
+	mux.HandleFunc("/wsoverhttp/", s.handleWSOverHTTP)
 	mux.HandleFunc("/health", s.handleHealth)
 	return mux
 }
