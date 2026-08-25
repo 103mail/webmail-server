@@ -1,0 +1,156 @@
+// Command webmail-worker runs the scheduled and deferred work that must not
+// happen in a request: draining the federation outbox, and sweeping the state
+// that ages out with it.
+//
+// It is a separate binary from the API server on purpose. Delivery to a peer is
+// a network call to a machine we do not control, with a 72-hour retry budget;
+// putting that behind a user's compose would mean the compose waits for a peer
+// that may be down. See ADR 17 and principle 5.
+//
+// Running several instances is safe. Rows are claimed with SELECT ... FOR UPDATE
+// SKIP LOCKED before any network work, so two workers never send the same
+// envelope, and delivery is idempotent at the receiver anyway.
+package main
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/mevdschee/webmail-server/internal/blob"
+	"github.com/mevdschee/webmail-server/internal/config"
+	"github.com/mevdschee/webmail-server/internal/email"
+	"github.com/mevdschee/webmail-server/internal/federation"
+	"github.com/mevdschee/webmail-server/internal/notify"
+	"github.com/mevdschee/webmail-server/internal/store"
+
+	"path/filepath"
+)
+
+const (
+	defaultInterval = 5 * time.Second
+	// batch is how many envelopes are claimed per peer per pass. Small, because
+	// a pass holds no locks across the network and a short cycle keeps a
+	// recovering peer's queue moving without a thundering herd.
+	batch = 20
+	// sweepEvery is how often aged-out dedup, nonce and delivered-outbox rows
+	// are deleted. There is no hurry: retention is measured in days.
+	sweepEvery = 15 * time.Minute
+	// stuckAfter is how long an in-flight row may sit before it is assumed to
+	// belong to a worker that died and is put back.
+	stuckAfter = 10 * time.Minute
+)
+
+func main() {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if err := run(log); err != nil {
+		log.Error("fatal", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(log *slog.Logger) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(cfg.DSN)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	startup, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelStartup()
+	if err := db.PingContext(startup); err != nil {
+		return err
+	}
+
+	fedConfig, err := federation.LoadConfig()
+	if err != nil {
+		return err
+	}
+	fed, err := federation.New(db, fedConfig, log, nil)
+	if err != nil {
+		return err
+	}
+	if !fed.Enabled() {
+		// Nothing to drain and nothing that could ever appear to drain. Exiting
+		// rather than idling makes a misconfiguration visible instead of
+		// looking like a healthy worker with no work.
+		log.Error("no federation config; this worker has nothing to do")
+		return nil
+	}
+
+	// The worker needs the mail domain for one thing only: writing a bounce
+	// into the sender's mailbox when delivery permanently fails.
+	attachments := blob.New(filepath.Join(cfg.DataDir, "attachments"))
+	mail := email.New(db, attachments, notify.New(db, nil), fed, log)
+	fed.Attach(mail)
+
+	interval := defaultInterval
+	if v := os.Getenv("WEBMAIL_WORKER_INTERVAL_SECONDS"); v != "" {
+		seconds, err := strconv.Atoi(v)
+		if err != nil || seconds <= 0 {
+			log.Warn("ignoring WEBMAIL_WORKER_INTERVAL_SECONDS", "value", v)
+		} else {
+			interval = time.Duration(seconds) * time.Second
+		}
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	log.Info("worker started", "domains", fed.LocalDomains(), "interval", interval.String())
+
+	drain := time.NewTicker(interval)
+	defer drain.Stop()
+	sweep := time.NewTicker(sweepEvery)
+	defer sweep.Stop()
+
+	// One pass immediately, so a restart does not wait a full interval before
+	// picking up whatever the previous process left behind.
+	requeue(ctx, fed, log)
+	drainOnce(ctx, fed, log)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info("worker shutting down")
+			return nil
+		case <-drain.C:
+			drainOnce(ctx, fed, log)
+		case <-sweep.C:
+			requeue(ctx, fed, log)
+			if err := fed.Sweep(ctx); err != nil && ctx.Err() == nil {
+				log.Error("sweep failed", "error", err)
+			}
+		}
+	}
+}
+
+// drainOnce makes one pass over the due work. A pass is bounded by its own
+// context so that a peer that accepts a connection and then goes quiet cannot
+// stall the loop past the next tick by more than the client timeout.
+func drainOnce(ctx context.Context, fed *federation.Service, log *slog.Logger) {
+	pass, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	handled, err := fed.Drain(pass, batch)
+	if err != nil && ctx.Err() == nil {
+		log.Error("drain failed", "error", err)
+	}
+	if handled > 0 {
+		log.Info("drained the outbox", "envelopes", handled)
+	}
+}
+
+func requeue(ctx context.Context, fed *federation.Service, log *slog.Logger) {
+	if err := fed.RequeueStuck(ctx, stuckAfter); err != nil && ctx.Err() == nil {
+		log.Error("could not requeue stuck envelopes", "error", err)
+	}
+}

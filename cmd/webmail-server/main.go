@@ -19,6 +19,7 @@ import (
 	"github.com/mevdschee/webmail-server/internal/chat"
 	"github.com/mevdschee/webmail-server/internal/config"
 	"github.com/mevdschee/webmail-server/internal/email"
+	"github.com/mevdschee/webmail-server/internal/federation"
 	"github.com/mevdschee/webmail-server/internal/mailer"
 	"github.com/mevdschee/webmail-server/internal/notify"
 	"github.com/mevdschee/webmail-server/internal/store"
@@ -67,6 +68,29 @@ func setupInbound(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 	return mailer.NewReceiver(verifier, objects), verifier, nil
 }
 
+// setupFederation builds the federation service. Without a configuration file
+// it returns a disabled service rather than nil, so every caller can treat
+// "not federated" as "every address is local" without a nil check.
+func setupFederation(ctx context.Context, db *store.DB, log *slog.Logger) (*federation.Service, error) {
+	cfg, err := federation.LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	fed, err := federation.New(db, cfg, log, nil)
+	if err != nil {
+		return nil, err
+	}
+	if !fed.Enabled() {
+		log.Warn("no federation config; every recipient is treated as local")
+		return fed, nil
+	}
+	if err := fed.RegisterLocalDomains(ctx); err != nil {
+		return nil, err
+	}
+	log.Info("federation enabled", "domains", fed.LocalDomains())
+	return fed, nil
+}
+
 func run(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -100,12 +124,27 @@ func run(log *slog.Logger) error {
 	// email_template row. See ADR 4 and ADR 16.
 	notifier := notify.New(db, sender)
 
+	// Federation is wired in two directions and neither package imports the
+	// other: the mail domain enqueues outbound envelopes through the federation
+	// service, and the federation service hands accepted envelopes back to the
+	// mail domain through an interface it declares. See ADR 17.
+	fed, err := setupFederation(ctx, db, log)
+	if err != nil {
+		return err
+	}
+	var federator email.Federator
+	if fed.Enabled() {
+		federator = fed
+	}
+	mail := email.New(db, attachments, notifier, federator, log)
+	fed.Attach(mail)
+
 	server := api.New(cfg, log,
 		auth.New(db),
-		email.New(db, attachments, notifier, log),
+		mail,
 		calendar.New(db, documents),
 		chat.New(db, attachments),
-		receiver, verifier,
+		receiver, verifier, fed,
 	)
 
 	httpServer := &http.Server{

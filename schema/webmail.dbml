@@ -119,11 +119,23 @@ Table "customer" {
 
 Table "domain" {
   "id" int(11) [pk, increment, not null]
-  "name" varchar(255) [not null]
+  "name" varchar(255) [unique, not null]
   "customer_id" bigint(20)
+  // Federation (ADR 17). A local row is a Domain this Server is authoritative
+  // for; a remote row is a peer descriptor cached under trust on first use.
+  "is_local" tinyint(1) [not null, default: 0]
+  "public_key" varchar(255) [not null, default: '']
+  "previous_public_keys" varchar(1024) [not null, default: '']
+  "versions" varchar(255) [not null, default: '']
+  "is_registrar" tinyint(1) [not null, default: 0]
+  "max_envelope_bytes" bigint(20) [not null, default: 10485760]
+  "max_attachment_bytes" bigint(20) [not null, default: 26214400]
+  "discovered_at" datetime
+  "discovery_failed_at" datetime
 
   indexes {
     ("customer_id") [name: "customer_id"]
+    ("is_local") [name: "is_local"]
   }
 }
 
@@ -139,6 +151,66 @@ Table "email_template" {
 
   indexes {
     ("language", "name") [unique, name: "language_name"]
+  }
+}
+
+// ── Federation (ADR 17) ─────────────────────────────────────────────────────
+
+// Every cross-Server request this Server still owes a peer. One table and one
+// worker for every kind of outbound call: `kind` discriminates the payload, not
+// the delivery machinery. The row is written in the same transaction as the
+// g_* rows it describes, so a crash after commit re-sends rather than loses.
+Table "federation_outbox" {
+  "id" bigint(20) [pk, increment, not null]
+  "kind" varchar(32) [not null, default: 'envelope']
+  "peer_domain" varchar(255) [not null]
+  "origin_domain" varchar(255) [not null]
+  // The exact bytes to send. Signed at send time rather than here, because the
+  // signing input covers the Date and Nonce headers, which have to be fresh on
+  // every attempt. The body itself is never re-serialized.
+  "body" longblob [not null]
+  "idempotency_key" varchar(36) [not null]
+  "related_id" bigint(20)
+  "status" varchar(20) [not null, default: 'pending']
+  "attempts" int(11) [not null, default: 0]
+  "last_error" text
+  "last_http_status" int(11)
+  "next_retry_at" datetime [not null, default: 'current_timestamp()']
+  "created_at" datetime [not null, default: 'current_timestamp()']
+  "delivered_at" datetime
+
+  indexes {
+    ("origin_domain", "idempotency_key") [unique, name: "origin_idempotency"]
+    ("status", "next_retry_at") [name: "claimable"]
+    ("peer_domain") [name: "peer_domain"]
+  }
+}
+
+// Envelopes already accepted, so a redelivery replays the original response
+// without inserting the message twice. Retained at least 96 hours (RFC 5.4).
+Table "federation_inbox" {
+  "id" bigint(20) [pk, increment, not null]
+  "sender_domain" varchar(255) [not null]
+  "envelope_id" varchar(36) [not null]
+  "received_at" datetime [not null, default: 'current_timestamp()']
+
+  indexes {
+    ("sender_domain", "envelope_id") [unique, name: "sender_envelope"]
+    ("received_at") [name: "received_at"]
+  }
+}
+
+// Nonces seen inside the replay window, per sender and endpoint kind (RFC 9.4).
+Table "federation_nonce" {
+  "id" bigint(20) [pk, increment, not null]
+  "sender_domain" varchar(255) [not null]
+  "endpoint" varchar(32) [not null, default: 'inbound']
+  "nonce" varchar(64) [not null]
+  "seen_at" datetime [not null, default: 'current_timestamp()']
+
+  indexes {
+    ("sender_domain", "endpoint", "nonce") [unique, name: "sender_endpoint_nonce"]
+    ("seen_at") [name: "seen_at"]
   }
 }
 
@@ -163,9 +235,11 @@ Table "g_attachment" {
   "mime_type" varchar(255) [not null]
   "file_size" int(11) [not null]
   "hash_md5" varchar(255) [not null]
+  "federation_id" varchar(36) [unique]
 
   indexes {
     ("g_message_id") [name: "thread_id"]
+    ("federation_id") [name: "federation_id"]
   }
 }
 
@@ -273,9 +347,11 @@ Table "g_message" {
   "body_html" longtext
   "created_at" datetime [default: 'current_timestamp()']
   "sent_at" datetime
+  "federation_id" varchar(36) [unique]
 
   indexes {
     ("g_thread_id") [name: "g_thread_id"]
+    ("federation_id") [name: "federation_id"]
   }
 }
 
@@ -308,6 +384,14 @@ Table "g_thread" {
   "body_summary" varchar(255) [not null, default: '']
   "created_at" datetime [not null, default: 'current_timestamp()']
   "updated_at" datetime [default: 'current_timestamp()']
+  // Stable across Domains, unlike `id`, which is a local autoincrement. This
+  // is what correlates a reply arriving from a peer with the thread it
+  // belongs to (ADR 17).
+  "federation_id" varchar(36) [unique]
+
+  indexes {
+    ("federation_id") [name: "federation_id"]
+  }
 }
 
 Table "inbound_email" {

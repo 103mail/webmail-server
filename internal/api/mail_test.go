@@ -54,7 +54,7 @@ func newInboundServer(t *testing.T) *Server {
 	verifier := mailer.NewVerifier(nil, "arn:aws:sns:eu-west-1:1:inbound")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return New(&config.Config{MaxBodyBytes: 1 << 20}, log, nil, nil, nil, nil,
-		mailer.NewReceiver(verifier, nil), verifier)
+		mailer.NewReceiver(verifier, nil), verifier, nil)
 }
 
 func postInbound(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
@@ -78,7 +78,7 @@ func TestInboundMailRejectsNonPost(t *testing.T) {
 // that it is unavailable rather than accepting a post it cannot authenticate.
 func TestInboundMailReportsUnconfigured(t *testing.T) {
 	s := New(&config.Config{MaxBodyBytes: 1 << 20}, slog.New(slog.NewTextHandler(io.Discard, nil)),
-		nil, nil, nil, nil, nil, nil)
+		nil, nil, nil, nil, nil, nil, nil)
 	if w := postInbound(t, s, `{"Type":"Notification"}`); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
 	}

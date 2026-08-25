@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	"github.com/mevdschee/webmail-server/internal/federation"
 	"github.com/mevdschee/webmail-server/internal/mdconv"
 	"github.com/mevdschee/webmail-server/internal/store"
 )
@@ -62,7 +63,7 @@ func (s *Service) AddThread(ctx context.Context, customerID, folderID int64,
 				return fmt.Errorf("subscribe %s: %w", email, err)
 			}
 		}
-		_, err = s.deliver(ctx, tx, gThreadID, sender, bodyHTML, attachments, &onboarded)
+		_, err = s.deliver(ctx, tx, customerID, gThreadID, sender, bodyHTML, attachments, &onboarded)
 		return err
 	})
 	if err != nil {
@@ -109,7 +110,7 @@ func (s *Service) AddMessage(ctx context.Context, customerID, threadID int64,
 		if sender.Email == "" {
 			return nil
 		}
-		messageID, err = s.deliver(ctx, tx, gThreadID, sender, bodyHTML, attachments, &onboarded)
+		messageID, err = s.deliver(ctx, tx, customerID, gThreadID, sender, bodyHTML, attachments, &onboarded)
 		return err
 	})
 	if err != nil {
@@ -163,7 +164,7 @@ func (s *Service) AddSubscriber(ctx context.Context, customerID, threadID int64,
 		bodyHTML := fmt.Sprintf(
 			"<html><body><p><i>%s has added %s to this thread's subscribers</i></p></body></html>",
 			sender.Email, email)
-		messageID, err = s.deliver(ctx, tx, gThreadID, sender, bodyHTML, nil, &onboarded)
+		messageID, err = s.deliver(ctx, tx, customerID, gThreadID, sender, bodyHTML, nil, &onboarded)
 		return err
 	})
 	if err != nil {
@@ -212,7 +213,7 @@ func senderIdentity(ctx context.Context, q store.Queryer, customerID, mailboxID 
 //
 // The sender must already be subscribed; this is what stops a thread from being
 // used to inject a message on someone else's behalf.
-func (s *Service) deliver(ctx context.Context, tx *sql.Tx, gThreadID int64,
+func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gThreadID int64,
 	sender identity, bodyHTML string, attachments []NewAttachment, onboarded *[]invitee) (int64, error) {
 	subscribers, err := store.SelectStrings(ctx, tx,
 		"SELECT `email` FROM `g_subscription` WHERE `g_thread_id` = ?", gThreadID)
@@ -244,9 +245,30 @@ func (s *Service) deliver(ctx context.Context, tx *sql.Tx, gThreadID int64,
 		return 0, err
 	}
 
+	// Federation splits the fan-out in two (ADR 17). A subscriber on a Domain
+	// this Server hosts is delivered the way it always was: a projection row
+	// written here, inside this transaction. A subscriber on another Domain is
+	// not onboarded locally, because that would hand them an address here that
+	// is not theirs; their envelope is queued instead, in this same
+	// transaction, and a worker carries it across.
+	remote := map[string][]string{}
 	var messageID int64
 	deliveredTo := map[int64]bool{}
 	for _, email := range subscribers {
+		if email != sender.Email && !s.isLocal(email) {
+			domain := federation.DomainOf(email)
+			remote[domain] = append(remote[domain], email)
+			// The sender still sees them as a contact, so autocomplete works,
+			// but no local mailbox is created for them (design 8).
+			if senderCustomerID != 0 {
+				if _, err := tx.ExecContext(ctx,
+					"INSERT IGNORE INTO `contact` (`customer_id`, `email`, `name`) VALUES (?,?,?)",
+					senderCustomerID, email, ""); err != nil {
+					return 0, fmt.Errorf("record remote subscriber as contact: %w", err)
+				}
+			}
+			continue
+		}
 		if email != sender.Email {
 			if err := s.ensureCustomer(ctx, tx, email, "", onboarded); err != nil {
 				return 0, err
@@ -321,6 +343,21 @@ func (s *Service) deliver(ctx context.Context, tx *sql.Tx, gThreadID int64,
 			subCustomerID, sender.Email, sender.Name); err != nil {
 			return 0, fmt.Errorf("record sender as contact: %w", err)
 		}
+	}
+
+	// senderCustomerID is zero only on the path that accepts mail from outside
+	// the system, where the sender has no tenancy here and therefore no Domain
+	// to sign as. Such a message is delivered to its local recipients and goes
+	// no further: relaying it on would mean signing someone else's content as
+	// this Domain.
+	if senderCustomerID != 0 {
+		if err := s.federate(ctx, tx, gThreadID, gMessageID, sender, subscribers, remote,
+			body, bodyHTML, attachments); err != nil {
+			return 0, err
+		}
+	} else if len(remote) > 0 {
+		s.log.Info("not relaying externally received mail to another Domain",
+			"sender", sender.Email, "domains", len(remote))
 	}
 	return messageID, nil
 }

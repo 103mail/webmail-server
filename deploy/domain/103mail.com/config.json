@@ -1,0 +1,9 @@
+{
+  "domain": "103mail.com",
+  "apiBase": "https://webmail.103mail.com/api/v1",
+  "brand": {
+    "name": "103mail",
+    "logo": "/103mail.svg",
+    "marketingUrl": "https://103mail.com"
+  }
+}

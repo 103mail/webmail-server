@@ -1,0 +1,13 @@
+{
+  "domains": [
+    {
+      "domain": "example.com",
+      "customerId": 1,
+      "privateKeyFile": "/etc/webmail/keys/example.com.ed25519.pem"
+    }
+  ],
+  "allowedPeers": [],
+  "maxEnvelopeBytes": 10485760,
+  "maxAttachmentBytes": 26214400,
+  "extraCaFile": "/etc/webmail/certs/webmail-local-ca.crt"
+}

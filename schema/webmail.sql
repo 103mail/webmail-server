@@ -128,8 +128,19 @@ CREATE TABLE `domain` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `name` varchar(255) NOT NULL,
   `customer_id` bigint(20) DEFAULT NULL,
+  `is_local` tinyint(1) NOT NULL DEFAULT 0,
+  `public_key` varchar(255) NOT NULL DEFAULT '',
+  `previous_public_keys` varchar(1024) NOT NULL DEFAULT '',
+  `versions` varchar(255) NOT NULL DEFAULT '',
+  `is_registrar` tinyint(1) NOT NULL DEFAULT 0,
+  `max_envelope_bytes` bigint(20) NOT NULL DEFAULT 10485760,
+  `max_attachment_bytes` bigint(20) NOT NULL DEFAULT 26214400,
+  `discovered_at` datetime DEFAULT NULL,
+  `discovery_failed_at` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `name` (`name`),
   KEY `customer_id` (`customer_id`),
+  KEY `is_local` (`is_local`),
   CONSTRAINT `domain_ibfk_1` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 DROP TABLE IF EXISTS `email_template`;
@@ -146,6 +157,48 @@ CREATE TABLE `email_template` (
   UNIQUE KEY `language_name` (`language`,`name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 DROP TABLE IF EXISTS `folder`;
+CREATE TABLE `federation_inbox` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `sender_domain` varchar(255) NOT NULL,
+  `envelope_id` varchar(36) NOT NULL,
+  `received_at` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `sender_envelope` (`sender_domain`,`envelope_id`),
+  KEY `received_at` (`received_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `federation_nonce` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `sender_domain` varchar(255) NOT NULL,
+  `endpoint` varchar(32) NOT NULL DEFAULT 'inbound',
+  `nonce` varchar(64) NOT NULL,
+  `seen_at` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `sender_endpoint_nonce` (`sender_domain`,`endpoint`,`nonce`),
+  KEY `seen_at` (`seen_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE `federation_outbox` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `kind` varchar(32) NOT NULL DEFAULT 'envelope',
+  `peer_domain` varchar(255) NOT NULL,
+  `origin_domain` varchar(255) NOT NULL,
+  `body` longblob NOT NULL,
+  `idempotency_key` varchar(36) NOT NULL,
+  `related_id` bigint(20) DEFAULT NULL,
+  `status` varchar(20) NOT NULL DEFAULT 'pending',
+  `attempts` int(11) NOT NULL DEFAULT 0,
+  `last_error` text DEFAULT NULL,
+  `last_http_status` int(11) DEFAULT NULL,
+  `next_retry_at` datetime NOT NULL DEFAULT current_timestamp(),
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  `delivered_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `origin_idempotency` (`origin_domain`,`idempotency_key`),
+  KEY `claimable` (`status`,`next_retry_at`),
+  KEY `peer_domain` (`peer_domain`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 CREATE TABLE `folder` (
   `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `customer_id` bigint(20) NOT NULL,
@@ -167,7 +220,9 @@ CREATE TABLE `g_attachment` (
   `mime_type` varchar(255) NOT NULL,
   `file_size` int(11) NOT NULL,
   `hash_md5` varchar(255) NOT NULL,
+  `federation_id` varchar(36) DEFAULT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `federation_id` (`federation_id`),
   KEY `thread_id` (`g_message_id`),
   CONSTRAINT `g_attachment_ibfk_1` FOREIGN KEY (`g_message_id`) REFERENCES `g_message` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -273,7 +328,9 @@ CREATE TABLE `g_message` (
   `body_html` longtext DEFAULT NULL,
   `created_at` datetime DEFAULT current_timestamp(),
   `sent_at` datetime DEFAULT NULL,
+  `federation_id` varchar(36) DEFAULT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `federation_id` (`federation_id`),
   KEY `g_thread_id` (`g_thread_id`),
   FULLTEXT KEY `sender_name` (`sender_name`),
   FULLTEXT KEY `body` (`body`),
@@ -309,7 +366,9 @@ CREATE TABLE `g_thread` (
   `body_summary` varchar(255) NOT NULL DEFAULT '',
   `created_at` datetime NOT NULL DEFAULT current_timestamp(),
   `updated_at` datetime DEFAULT current_timestamp(),
+  `federation_id` varchar(36) DEFAULT NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `federation_id` (`federation_id`),
   FULLTEXT KEY `subject_line` (`subject_line`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 DROP TABLE IF EXISTS `inbound_email`;

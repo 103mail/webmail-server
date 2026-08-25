@@ -17,6 +17,7 @@ import (
 	crand "crypto/rand"
 
 	"github.com/mevdschee/webmail-server/internal/blob"
+	"github.com/mevdschee/webmail-server/internal/federation"
 	"github.com/mevdschee/webmail-server/internal/store"
 )
 
@@ -31,6 +32,25 @@ type Notifier interface {
 		preferredLanguage string, params map[string]string, bccEmail string) error
 }
 
+// Federator decides which recipients are reachable locally and queues the rest
+// for delivery to their own Domain. It is what *federation.Service satisfies.
+//
+// Declared here for the same reason Notifier is: the mail domain states what it
+// needs rather than depending on a concrete implementation. The types it
+// exchanges belong to the federation package, which owns the wire, so the
+// dependency runs one way and there is no cycle.
+type Federator interface {
+	// IsLocal reports whether a DNS domain is one this Server is authoritative
+	// for. With federation switched off it answers true for everything, which
+	// is exactly the single-domain behaviour this replaces.
+	IsLocal(domain string) bool
+	// OriginFor returns the local Domain an address sends as, and false if the
+	// address is not on a Domain hosted here.
+	OriginFor(senderEmail string) (*federation.LocalDomain, bool)
+	// Enqueue writes an envelope to the outbox in the caller's transaction.
+	Enqueue(ctx context.Context, tx *sql.Tx, out federation.Outbound) error
+}
+
 // Service implements the mail domain against a database and a blob store.
 type Service struct {
 	db   *store.DB
@@ -38,16 +58,29 @@ type Service struct {
 	// notifier is nil when outbound mail is not configured, which disables
 	// onboarding invitations rather than failing delivery.
 	notifier Notifier
-	log      *slog.Logger
+	// federation is nil when no Domain is configured, in which case every
+	// address is delivered locally and unknown recipients are onboarded, which
+	// is what this backend did before federation existed.
+	federation Federator
+	log        *slog.Logger
 }
 
 // New returns a Service. attachments is the directory holding attachment bytes.
-// notifier may be nil.
-func New(db *store.DB, attachments *blob.Store, notifier Notifier, log *slog.Logger) *Service {
+// notifier and federator may be nil.
+func New(db *store.DB, attachments *blob.Store, notifier Notifier, federator Federator,
+	log *slog.Logger) *Service {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Service{db: db, blob: attachments, notifier: notifier, log: log}
+	return &Service{db: db, blob: attachments, notifier: notifier, federation: federator, log: log}
+}
+
+// isLocal reports whether an address is delivered on this Server.
+func (s *Service) isLocal(address string) bool {
+	if s.federation == nil {
+		return true
+	}
+	return s.federation.IsLocal(federation.DomainOf(address))
 }
 
 // Party is an email address with the display name the viewing customer knows

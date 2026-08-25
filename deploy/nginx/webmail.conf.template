@@ -1,0 +1,76 @@
+# One template, both Domains. The nginx image substitutes ${WEBMAIL_DOMAIN}
+# from the environment at start-up, so the only thing that distinguishes the two
+# web containers is that variable and the files mounted at /etc/nginx/domain.
+#
+# Everything a Domain exposes lives under the one hostname webmail.{domain}:
+# the client bundle, /config.json, the peer descriptor and the REST API. That is
+# what removes the cross-origin handshake between bundle and API (design 2).
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name webmail.${WEBMAIL_DOMAIN};
+
+    ssl_certificate     /etc/nginx/certs/webmail.${WEBMAIL_DOMAIN}.crt;
+    ssl_certificate_key /etc/nginx/certs/webmail.${WEBMAIL_DOMAIN}.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    root /usr/share/nginx/html;
+    client_max_body_size 32m;   # matches WEBMAIL_MAX_BODY_BYTES
+
+    # Docker's embedded DNS, with upstreams held in variables. nginx resolves a
+    # literal proxy_pass host once at start-up, so restarting the API container
+    # would otherwise 502 until nginx itself restarted.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    # The client fetches this before first render and takes its domain, API base
+    # and branding from it (design 2). Never cached: it is what makes one bundle
+    # serve every Domain.
+    location = /config.json {
+        alias /etc/nginx/domain/config.json;
+        default_type application/json;
+        add_header Cache-Control "no-store";
+    }
+
+    # Peer descriptor, RFC 4.1. Proxied rather than served from a file, so it
+    # is rendered from the private key the server actually signs with and the
+    # two cannot drift apart. MUST NOT redirect, so no try_files here.
+    location = /.well-known/webmail-federation {
+        set $wellknown_upstream http://api:8080;
+        proxy_pass $wellknown_upstream$request_uri;
+        proxy_set_header Host $host;
+    }
+
+    location /api/ {
+        set $api_upstream http://api:8080;
+        proxy_pass $api_upstream$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    location = /health {
+        set $health_upstream http://api:8080;
+        proxy_pass $health_upstream/health;
+    }
+
+    # Hashed assets are immutable; index.html must not be, or a deploy is
+    # invisible until the browser cache expires.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    location / {
+        try_files $uri /index.html;
+        add_header Cache-Control "no-cache";
+    }
+}
+
+server {
+    listen 80;
+    server_name webmail.${WEBMAIL_DOMAIN};
+    return 301 https://$host$request_uri;
+}

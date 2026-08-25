@@ -25,3 +25,4 @@ rewrite.
 | [14](0014-schema-baseline-and-calendar-reimplementation.md) | Schema baseline, and calendar reimplemented from the spec | webmail |
 | [15](0015-email-transport-over-amazon-ses.md) | Email transport: SNS out, SES in | webmail |
 | [16](0016-wiring-email-in-and-out.md) | Wiring email in and out | |
+| [17](0017-implementing-webmail-federation.md) | Implementing Webmail-Federation | webmail-federation |

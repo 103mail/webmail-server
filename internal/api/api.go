@@ -18,6 +18,7 @@ import (
 	"github.com/mevdschee/webmail-server/internal/chat"
 	"github.com/mevdschee/webmail-server/internal/config"
 	"github.com/mevdschee/webmail-server/internal/email"
+	"github.com/mevdschee/webmail-server/internal/federation"
 	"github.com/mevdschee/webmail-server/internal/mailer"
 )
 
@@ -35,12 +36,17 @@ type Server struct {
 	// silently accepting posts it cannot authenticate.
 	receiver *mailer.Receiver
 	verifier *mailer.Verifier
+	// federation is nil when no Domain is configured, in which case the
+	// well-known endpoint answers 404 and the inbound endpoint 503 rather than
+	// accepting envelopes there is no key to verify.
+	federation *federation.Service
 }
 
 // New returns a Server. receiver and verifier may be nil, which disables the
 // inbound mail webhook.
 func New(cfg *config.Config, log *slog.Logger, a *auth.Service, e *email.Service,
-	c *calendar.Service, ch *chat.Service, receiver *mailer.Receiver, verifier *mailer.Verifier) *Server {
+	c *calendar.Service, ch *chat.Service, receiver *mailer.Receiver, verifier *mailer.Verifier,
+	fed *federation.Service) *Server {
 	origins := make(map[string]bool, len(cfg.AllowedOrigins))
 	for _, o := range cfg.AllowedOrigins {
 		if o != "" {
@@ -48,7 +54,7 @@ func New(cfg *config.Config, log *slog.Logger, a *auth.Service, e *email.Service
 		}
 	}
 	return &Server{cfg: cfg, log: log, auth: a, email: e, calendar: c, chat: ch,
-		origins: origins, receiver: receiver, verifier: verifier}
+		origins: origins, receiver: receiver, verifier: verifier, federation: fed}
 }
 
 // Handler returns the root HTTP handler.
@@ -59,6 +65,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/calendar/", s.route(s.handleCalendar))
 	mux.HandleFunc("/api/v1/chat/", s.route(s.handleChat))
 	mux.HandleFunc("/api/v1/mail/inbound", s.handleInboundMail)
+	// Federation. Both are authenticated by Ed25519 signature or are public by
+	// definition, so neither goes through the bearer-token route wrapper.
+	mux.HandleFunc(federation.WellKnownPath, s.handleWellKnown)
+	mux.HandleFunc(federation.InboundPath, s.handleFederationInbound)
 	mux.HandleFunc("/health", s.handleHealth)
 	return mux
 }

@@ -11,6 +11,16 @@ side by side. See [CLAUDE.md](CLAUDE.md) for the conventions and
     go build ./cmd/webmail-server
     ./webmail-server
 
+For a full local stack instead, `deploy/` brings up two independent Domains
+(`webmail.103mail.com` and `webmail.example.com`), each with its own database,
+API process and hostname, serving the client bundle from
+`../webmail-client`:
+
+    cd deploy && ./setup.sh && docker compose up -d --build
+
+See [deploy/README.md](deploy/README.md) for the hosts entries it needs and for
+what the topology does not yet do, federation above all.
+
 Configuration comes from the environment:
 
 | Variable | Default | Meaning |
@@ -49,10 +59,11 @@ readable model of it. To create a database:
     mysql -u root -p < create.sql
     mysql -u webmail -p webmail < schema/webmail.sql
 
-A database created before the calendaring work needs
-`schema/migrations/0001-calendar-rsvp-and-recurrence.sql`, which adds the four
-calendar columns the API requires. Read it before running it: it changes the
-type of `g_attendee.will_attend`.
+A database created before the calendaring work is brought up to date with
+`dbml-tools migrate`, which compares the live schema against
+`schema/webmail.dbml` and writes the SQL to close the gap. Read what it
+generates before running it: the calendar work changes the type of
+`g_attendee.will_attend`.
 
 ## Email
 

@@ -1,0 +1,9 @@
+{
+  "domain": "example.com",
+  "apiBase": "https://webmail.example.com/api/v1",
+  "brand": {
+    "name": "Example Mail",
+    "logo": "/mail.svg",
+    "marketingUrl": "https://example.com"
+  }
+}
