@@ -139,6 +139,10 @@ staging deployment cannot mail real people.
 
 ## Testing
 
+[TESTING.md](TESTING.md) is the manual pass: how to set the local stack up,
+what the seed data contains, and step by step checks for mail, calendar, chat
+and federation. It is the real gate for chat, which has no automated coverage.
+
     go test ./...
 
 The suite covers the logic that does not need a database: HTML to markdown
