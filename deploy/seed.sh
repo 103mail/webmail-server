@@ -96,9 +96,27 @@ INSERT INTO \`message\` (\`id\`, \`customer_id\`, \`thread_id\`, \`g_message_id\
 
 -- ── Calendar ────────────────────────────────────────────────────────────────
 -- Relative to today, so the default month view is never empty.
+--
+-- start_time and end_time are UTC; time_zone is the display zone stored
+-- alongside them (ADR 8). The wall clock hours below are Amsterdam local, so
+-- they have to be converted rather than written straight in, or every timed
+-- meeting renders an offset out. CONVERT_TZ with a named zone follows DST,
+-- which a fixed +02:00 would not. It needs the server's time zone tables:
+-- without them it returns NULL and these NOT NULL columns reject the insert,
+-- which is the loud failure we want rather than silently wrong times.
+--
+-- The all day meeting is deliberately not converted. ListMeetings buckets by
+-- UTC day, so midnight to midnight UTC lands on exactly one day, while the
+-- same span shifted by an offset would straddle two and draw the band twice.
 INSERT INTO \`g_meeting\` (\`id\`, \`title\`, \`start_time\`, \`end_time\`, \`time_zone\`, \`is_all_day\`, \`organizer_email\`, \`organizer_name\`, \`description\`) VALUES
-  (1, 'Standup', DATE_ADD(CURDATE(), INTERVAL 9 HOUR), DATE_ADD(CURDATE(), INTERVAL 570 MINUTE), 'Europe/Amsterdam', 0, '$ALIAS', '$NAME', 'Daily standup'),
-  (2, 'Design review', DATE_ADD(CURDATE(), INTERVAL 34 HOUR), DATE_ADD(CURDATE(), INTERVAL 35 HOUR), 'Europe/Amsterdam', 0, '$PEER_EMAIL', '$PEER_NAME', 'Walk through the federation design'),
+  (1, 'Standup',
+   CONVERT_TZ(DATE_ADD(CURDATE(), INTERVAL 9 HOUR), 'Europe/Amsterdam', 'UTC'),
+   CONVERT_TZ(DATE_ADD(CURDATE(), INTERVAL 570 MINUTE), 'Europe/Amsterdam', 'UTC'),
+   'Europe/Amsterdam', 0, '$ALIAS', '$NAME', 'Daily standup'),
+  (2, 'Design review',
+   CONVERT_TZ(DATE_ADD(CURDATE(), INTERVAL 34 HOUR), 'Europe/Amsterdam', 'UTC'),
+   CONVERT_TZ(DATE_ADD(CURDATE(), INTERVAL 35 HOUR), 'Europe/Amsterdam', 'UTC'),
+   'Europe/Amsterdam', 0, '$PEER_EMAIL', '$PEER_NAME', 'Walk through the federation design'),
   (3, 'Company day', DATE_ADD(CURDATE(), INTERVAL 3 DAY), DATE_ADD(CURDATE(), INTERVAL 4 DAY), 'Europe/Amsterdam', 1, '$ALIAS', '$NAME', 'All day, no agenda');
 INSERT INTO \`meeting\` (\`id\`, \`customer_id\`, \`g_meeting_id\`, \`mailbox_id\`, \`will_attend\`) VALUES
   (1, 1, 1, 1, 'yes'), (2, 1, 2, 1, 'maybe'), (3, 1, 3, 1, NULL);
