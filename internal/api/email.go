@@ -177,15 +177,20 @@ func (s *Server) handleEmail(w http.ResponseWriter, r *http.Request, req *reques
 		if threadID == 0 {
 			return nil, http.StatusBadRequest
 		}
-		if req.Method != http.MethodPost {
-			return nil, http.StatusMethodNotAllowed
-		}
 		address := req.str("email")
 		if address == "" {
 			return nil, http.StatusBadRequest
 		}
-		out, err := s.email.AddSubscriber(ctx, customerID, threadID, address)
-		return s.result(w, r, out, err)
+		switch req.Method {
+		case http.MethodPost:
+			out, err := s.email.AddSubscriber(ctx, customerID, threadID, address)
+			return s.result(w, r, out, err)
+		case http.MethodDelete:
+			// Leaving: only one's own address, nobody can be removed (RFC 5.6).
+			out, err := s.email.Leave(ctx, customerID, threadID, address)
+			return s.result(w, r, out, err)
+		}
+		return nil, http.StatusMethodNotAllowed
 
 	case "message":
 		id := parseID(req.ID)
@@ -286,12 +291,21 @@ func toEmailAttachments(files []attachment) []email.NewAttachment {
 }
 
 // result answers 200 with the value, 400 naming the addresses when a message
-// was refused for recipients with no account, or 500 for any other error.
+// was refused for recipients with no account, 403 when the caller is not a
+// member or tried to remove someone else, or 500 for any other error.
 func (s *Server) result(w http.ResponseWriter, r *http.Request, value any, err error) (any, int) {
 	var unknown *email.UnknownRecipientsError
 	if errors.As(err, &unknown) {
 		return map[string]any{"error": "unknown_recipients", "recipients": unknown.Addresses},
 			http.StatusBadRequest
+	}
+	var notMember *email.NotMemberError
+	if errors.As(err, &notMember) {
+		return map[string]any{"error": "not_a_member", "detail": err.Error()}, http.StatusForbidden
+	}
+	var notYours *email.OnlyYourselfError
+	if errors.As(err, &notYours) {
+		return map[string]any{"error": "only_yourself", "detail": err.Error()}, http.StatusForbidden
 	}
 	if err != nil {
 		s.fail(w, r, err)

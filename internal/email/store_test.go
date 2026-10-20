@@ -614,6 +614,175 @@ func TestARefusalOnlyCountsForTheSendersOwnAddresses(t *testing.T) {
 	}
 }
 
+// A new member is shown the thread's earlier messages, on this Server or when
+// an invitation arrives from another Domain (RFC 5.6).
+func TestAnInvitationBringsTheHistory(t *testing.T) {
+	f := newFixture(t)
+	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
+	bob, _, bobInbox := f.account("bob@example.test", "Bob")
+	chris, _, chrisInbox := f.account("chris@example.test", "Chris")
+	dave, _, daveInbox := f.account("dave@example.test", "Dave")
+
+	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"bob@example.test"}, "Vendors", "<p>Shortlist</p>", nil); err != nil {
+		t.Fatal(err)
+	}
+	bobThreads, _ := f.svc.ListThreads(f.ctx, bob, bobInbox, "")
+	if _, err := f.svc.AddMessage(f.ctx, bob, bobThreads[0].ThreadID, "<p>Vendor B</p>", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.AddSubscriber(f.ctx, bob, bobThreads[0].ThreadID, "chris@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	threads, _ := f.svc.ListThreads(f.ctx, chris, chrisInbox, "")
+	if len(threads) != 1 {
+		t.Fatalf("Chris has %d threads", len(threads))
+	}
+	messages, _ := f.svc.ListMessages(f.ctx, chris, threads[0].ThreadID, "")
+	if len(messages) != 3 || strings.TrimSpace(messages[2].Body) != "Shortlist" {
+		t.Errorf("Chris has %d messages, the oldest %q; want the two earlier ones and the invitation", len(messages),
+			strings.TrimSpace(messages[len(messages)-1].Body))
+	}
+
+	// From another Domain: Pete's thread with Bob, then an invitation for Dave.
+	in := federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+		Subject: "Across", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
+		SenderEmail: "pete@peer.test", SenderName: "Pete", Body: "First", SentAt: f.now,
+		Recipients: []string{"bob@example.test"}, Members: []string{"pete@peer.test", "bob@example.test"},
+	}
+	if _, _, err := f.svc.DeliverInbound(f.ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	in.MessageFedID, in.Body = "0192f0c0-0000-7000-8000-000000000003", "Pete added Dave"
+	in.Recipients = []string{"bob@example.test", "dave@example.test"}
+	in.Members = []string{"pete@peer.test", "bob@example.test", "dave@example.test"}
+	if _, _, err := f.svc.DeliverInbound(f.ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	daveThreads, _ := f.svc.ListThreads(f.ctx, dave, daveInbox, "")
+	if len(daveThreads) != 1 {
+		t.Fatalf("Dave has %d threads", len(daveThreads))
+	}
+	if messages, _ := f.svc.ListMessages(f.ctx, dave, daveThreads[0].ThreadID, ""); len(messages) != 2 {
+		t.Errorf("Dave has %d messages, want Pete's first and the invitation", len(messages))
+	}
+}
+
+// Leaving is told to the thread by the leaver's own Domain, in their name.
+// After that they get nothing new and cannot write; nobody can remove anyone
+// else (RFC 5.6).
+func TestLeavingAThread(t *testing.T) {
+	f := federatedFixture(t)
+	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
+	chris, _, chrisInbox := f.account("chris@example.test", "Chris")
+	threadID, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"chris@example.test", "bob@peer.test"},
+		"Vendors", "<p>Shortlist</p>", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chrisThreads, _ := f.svc.ListThreads(f.ctx, chris, chrisInbox, "")
+	chrisThread := chrisThreads[0].ThreadID
+
+	var notYours *OnlyYourselfError
+	if _, err := f.svc.Leave(f.ctx, alice, threadID, "chris@example.test"); !errors.As(err, &notYours) {
+		t.Fatalf("Alice removing Chris = %v, want refused", err)
+	}
+
+	f.exec(`DELETE FROM "federation_outbox"`)
+	if _, err := f.svc.Leave(f.ctx, chris, chrisThread, "chris@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	body, err := store.SelectString(f.ctx, f.db, `SELECT "body" FROM "federation_outbox" WHERE "peer_domain" = 'peer.test'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notice federation.Envelope
+	if err := json.Unmarshal([]byte(body), &notice); err != nil {
+		t.Fatal(err)
+	}
+	if notice.Message.SenderEmail != "chris@example.test" || !slices.Equal(notice.Thread.Left, []string{"chris@example.test"}) ||
+		slices.Contains(notice.Thread.Members, "chris@example.test") {
+		t.Errorf("the notice = %+v", notice)
+	}
+	aliceThreads, _ := f.svc.ListThreads(f.ctx, alice, aliceInbox, "")
+	for _, p := range aliceThreads[0].Subscribers {
+		if p.Email == "chris@example.test" {
+			t.Error("Alice still sees Chris as a member")
+		}
+	}
+
+	before, _ := f.svc.ListMessages(f.ctx, chris, chrisThread, "")
+	if _, err := f.svc.AddMessage(f.ctx, alice, threadID, "<p>Going with B</p>", nil); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := f.svc.ListMessages(f.ctx, chris, chrisThread, ""); len(after) != len(before) {
+		t.Errorf("Chris got %d new messages after leaving", len(after)-len(before))
+	}
+	var notMember *NotMemberError
+	if _, err := f.svc.AddMessage(f.ctx, chris, chrisThread, "<p>Wait</p>", nil); !errors.As(err, &notMember) {
+		t.Errorf("Chris replying after leaving = %v, want refused", err)
+	}
+}
+
+// A member who left gets nothing more, even from an envelope written before
+// their Domain's notice reached the sender. They are not refused either:
+// they exist, they just left (RFC 5.6).
+func TestADepartedMemberIsNotDeliveredTo(t *testing.T) {
+	f := federatedFixture(t)
+	chris, _, chrisInbox := f.account("chris@example.test", "Chris")
+	in := federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+		Subject: "Vendors", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
+		SenderEmail: "pete@peer.test", SenderName: "Pete", Body: "First", SentAt: f.now,
+		Recipients: []string{"chris@example.test"}, Members: []string{"pete@peer.test", "chris@example.test"},
+	}
+	if _, _, err := f.svc.DeliverInbound(f.ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	threads, _ := f.svc.ListThreads(f.ctx, chris, chrisInbox, "")
+	if _, err := f.svc.Leave(f.ctx, chris, threads[0].ThreadID, "chris@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	in.MessageFedID, in.Body = "0192f0c0-0000-7000-8000-000000000003", "Written before the notice arrived"
+	delivered, refused, err := f.svc.DeliverInbound(f.ctx, in)
+	if err != nil || delivered != 0 || len(refused) != 0 {
+		t.Errorf("DeliverInbound = %d, %v, %v; want nothing delivered and nobody refused", delivered, refused, err)
+	}
+	if messages, _ := f.svc.ListMessages(f.ctx, chris, threads[0].ThreadID, ""); len(messages) != 1 {
+		t.Errorf("Chris has %d messages after leaving, want only the first", len(messages))
+	}
+}
+
+// A departure only counts for an address on the sender's own domain.
+func TestALeaveOnlyCountsForTheSendersOwnAddresses(t *testing.T) {
+	f := newFixture(t)
+	bob, _, bobInbox := f.account("bob@example.test", "Bob")
+	in := federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+		Subject: "Party", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
+		SenderEmail: "pete@peer.test", SenderName: "Pete", Body: "Come", SentAt: f.now,
+		Recipients: []string{"bob@example.test"},
+		Members:    []string{"pete@peer.test", "bob@example.test", "gail@third.test"},
+	}
+	if _, _, err := f.svc.DeliverInbound(f.ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	in.MessageFedID, in.Body = "0192f0c0-0000-7000-8000-000000000003", "Pete left"
+	in.Members = []string{"bob@example.test"}
+	in.Left = []string{"pete@peer.test", "gail@third.test"}
+	if _, _, err := f.svc.DeliverInbound(f.ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	threads, _ := f.svc.ListThreads(f.ctx, bob, bobInbox, "")
+	var subscribers []string
+	for _, p := range threads[0].Subscribers {
+		subscribers = append(subscribers, p.Email)
+	}
+	if !slices.Equal(subscribers, []string{"gail@third.test"}) {
+		t.Errorf("Bob sees subscribers %v, want only Gail", subscribers)
+	}
+}
+
 // An unknown address on this Server's own Domain in an envelope's members is
 // not recorded: it was refused, it is not on the thread (RFC 5.3).
 func TestUnknownLocalMembersAreNotRecorded(t *testing.T) {

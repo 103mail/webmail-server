@@ -187,8 +187,10 @@ type Inbound struct {
 	Recipients   []string
 	// Members is everyone on the thread, on every Domain (RFC 5.3).
 	Members []string
-	// Refused are addresses the sender added that were refused (RFC 5.3).
+	// Refused and Left are addresses on the sender's own domain that are no
+	// longer members: refused as unknown, or departed (RFC 5.3, 5.6).
 	Refused       []string
+	Left          []string
 	Attachments   []InboundAttachment
 	DestinationID int64 // customer that owns the receiving Domain, 0 if unknown
 }

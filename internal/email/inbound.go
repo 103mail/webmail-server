@@ -123,7 +123,7 @@ func (s *Service) AddExternalThread(ctx context.Context, senderEmail, senderName
 		// here. That is what stops this path federating onward, which would
 		// make this Server a relay signing arbitrary internet mail as its own
 		// Domain. See deliver.
-		_, err = s.deliver(ctx, tx, 0, gThreadID, sender, bodyHTML, attachments, &onboarded)
+		_, err = s.deliver(ctx, tx, 0, gThreadID, sender, bodyHTML, attachments, &onboarded, nil)
 		return err
 	})
 	if err != nil {

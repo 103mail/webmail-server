@@ -22,7 +22,7 @@ import (
 // Everything here runs inside the caller's transaction, which is the point: the
 // canonical rows and the promise to deliver them commit together or not at all.
 func (s *Service) federate(ctx context.Context, tx *sql.Tx, gThreadID, gMessageID int64,
-	sentAt time.Time, sender identity, subscribers, refused []string, remote map[string][]string,
+	sentAt time.Time, sender identity, subscribers, refused, left []string, remote map[string][]string,
 	body, bodyHTML string, attachments []NewAttachment) error {
 	if len(remote) == 0 {
 		return nil
@@ -97,6 +97,7 @@ func (s *Service) federate(ctx context.Context, tx *sql.Tx, gThreadID, gMessageI
 			Recipients:  addresses,
 			Members:     subscribers,
 			Refused:     refused,
+			Left:        left,
 			Attachments: outAttachments,
 			RelatedID:   gMessageID,
 		}); err != nil {

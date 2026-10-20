@@ -484,7 +484,7 @@ func (s *Service) subscribersByThread(ctx context.Context, customerID int64, gTh
 			`FROM "g_subscription" `+
 			`LEFT JOIN "contact" ON "g_subscription"."email" = "contact"."email" `+
 			`AND "contact"."customer_id" = ? `+
-			`WHERE "g_thread_id" IN (`+in+`) AND "refused_at" IS NULL`,
+			`WHERE "g_thread_id" IN (`+in+`) AND `+isMember,
 		append([]any{customerID}, store.Args(gThreadIDs)...)...)
 	if err != nil {
 		return nil, fmt.Errorf("list thread subscribers: %w", err)
@@ -525,6 +525,10 @@ func (s *Service) aliasSet(ctx context.Context, customerID int64) (map[string]bo
 }
 
 // ListMessages returns the messages of a thread, newest first.
+// isMember is the condition on "g_subscription" for an address that is on
+// the thread: not refused as unknown and not departed (RFC 5.6).
+const isMember = `"refused_at" IS NULL AND "left_at" IS NULL`
+
 // messageOrder lists a thread newest first in the order every Domain shares:
 // send time in whole seconds, then federation id (RFC 5.5). Messages from
 // before federation have no federation id and fall back to their row order.
@@ -594,7 +598,7 @@ func (s *Service) ListMessages(ctx context.Context, customerID, threadID int64, 
 	names, err := store.SelectPairs(ctx, s.db,
 		`SELECT "g_subscription"."email", "contact"."name" FROM "g_subscription" `+
 			`LEFT JOIN "contact" ON "g_subscription"."email" = "contact"."email" `+
-			`AND "contact"."customer_id" = ? WHERE "g_thread_id" = ? AND "refused_at" IS NULL`,
+			`AND "contact"."customer_id" = ? WHERE "g_thread_id" = ? AND `+isMember,
 		customerID, gThreadID)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriber names: %w", err)

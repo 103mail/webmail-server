@@ -71,7 +71,7 @@ func (s *Service) AddThread(ctx context.Context, customerID, folderID int64,
 				return fmt.Errorf("subscribe %s: %w", email, err)
 			}
 		}
-		_, err = s.deliver(ctx, tx, customerID, gThreadID, sender, bodyHTML, attachments, &onboarded)
+		_, err = s.deliver(ctx, tx, customerID, gThreadID, sender, bodyHTML, attachments, &onboarded, nil)
 		return err
 	})
 	if err != nil {
@@ -118,7 +118,7 @@ func (s *Service) AddMessage(ctx context.Context, customerID, threadID int64,
 		if sender.Email == "" {
 			return nil
 		}
-		messageID, err = s.deliver(ctx, tx, customerID, gThreadID, sender, bodyHTML, attachments, &onboarded)
+		messageID, err = s.deliver(ctx, tx, customerID, gThreadID, sender, bodyHTML, attachments, &onboarded, nil)
 		return err
 	})
 	if err != nil {
@@ -173,10 +173,16 @@ func (s *Service) AddSubscriber(ctx context.Context, customerID, threadID int64,
 			gThreadID, email); err != nil {
 			return fmt.Errorf("add subscriber: %w", err)
 		}
+		// Inviting someone who left or was refused makes them a member again.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE "g_subscription" SET "left_at" = NULL, "refused_at" = NULL WHERE "g_thread_id" = ? AND "email" = ?`,
+			gThreadID, email); err != nil {
+			return fmt.Errorf("add subscriber: %w", err)
+		}
 		bodyHTML := fmt.Sprintf(
 			"<html><body><p><i>%s has added %s to this thread's subscribers</i></p></body></html>",
 			sender.Email, email)
-		messageID, err = s.deliver(ctx, tx, customerID, gThreadID, sender, bodyHTML, nil, &onboarded)
+		messageID, err = s.deliver(ctx, tx, customerID, gThreadID, sender, bodyHTML, nil, &onboarded, nil)
 		return err
 	})
 	if err != nil {
@@ -228,15 +234,19 @@ func senderIdentity(ctx context.Context, q store.Queryer, customerID, mailboxID 
 //
 // The sender must already be subscribed; this is what stops a thread from being
 // used to inject a message on someone else's behalf.
+//
+// left names members leaving with this message: the leaver may send it, and
+// is told to the thread in thread.left rather than as a member (RFC 5.6).
 func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gThreadID int64,
-	sender identity, bodyHTML string, attachments []NewAttachment, onboarded *[]invitee) (int64, error) {
+	sender identity, bodyHTML string, attachments []NewAttachment, onboarded *[]invitee,
+	left []string) (int64, error) {
 	subscribers, err := store.SelectStrings(ctx, tx,
-		`SELECT "email" FROM "g_subscription" WHERE "g_thread_id" = ? AND "refused_at" IS NULL`, gThreadID)
+		`SELECT "email" FROM "g_subscription" WHERE "g_thread_id" = ? AND `+isMember, gThreadID)
 	if err != nil {
 		return 0, fmt.Errorf("list subscribers: %w", err)
 	}
-	if !contains(subscribers, sender.Email) {
-		return 0, nil
+	if !contains(subscribers, sender.Email) && !contains(left, sender.Email) {
+		return 0, &NotMemberError{Address: sender.Email}
 	}
 
 	body := mdconv.ToMarkdown(bodyHTML)
@@ -346,6 +356,9 @@ func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gTh
 			if err != nil {
 				return 0, fmt.Errorf("create subscriber thread: %w", err)
 			}
+			if err := s.projectHistory(ctx, tx, subCustomerID, threadID, gThreadID, gMessageID); err != nil {
+				return 0, err
+			}
 		}
 		projectionID, err := store.Insert(ctx, tx,
 			`INSERT INTO "message" ("customer_id", "thread_id", "g_message_id") VALUES (?,?,?)`,
@@ -398,7 +411,7 @@ func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gTh
 	// no further: relaying it on would mean signing someone else's content as
 	// this Domain.
 	if senderCustomerID != 0 {
-		if err := s.federate(ctx, tx, gThreadID, gMessageID, now, sender, subscribers, nil, remote,
+		if err := s.federate(ctx, tx, gThreadID, gMessageID, now, sender, subscribers, nil, left, remote,
 			body, bodyHTML, attachments); err != nil {
 			return 0, err
 		}
@@ -595,4 +608,99 @@ func (s *Service) ownDomain(ctx context.Context, q store.Queryer, address string
 		return false, fmt.Errorf("look up domain %s: %w", domain, err)
 	}
 	return n > 0, nil
+}
+
+// NotMemberError refuses a message from someone who is not on the thread,
+// for example because they left it.
+type NotMemberError struct {
+	Address string
+}
+
+func (e *NotMemberError) Error() string { return e.Address + " is not a member of this thread" }
+
+// OnlyYourselfError refuses removing someone else from a thread: only a
+// member can leave, nobody can be removed (RFC 5.6).
+type OnlyYourselfError struct {
+	Address string
+}
+
+func (e *OnlyYourselfError) Error() string { return "only " + e.Address + " can remove themselves" }
+
+// Leave takes one of the customer's own addresses off a thread. The thread is
+// told the way an invitation is told: a message from the leaver, sent to
+// every other member and to their Domains with the address in thread.left.
+// The leaver keeps the history they had and gets nothing after it.
+func (s *Service) Leave(ctx context.Context, customerID, threadID int64, email string) (bool, error) {
+	email = store.Address(email)
+	var onboarded []invitee
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		var name string
+		err := tx.QueryRowContext(ctx,
+			`SELECT "name" FROM "alias" WHERE "customer_id" = ? AND "email" = ? LIMIT 1`,
+			customerID, email).Scan(&name)
+		if err == sql.ErrNoRows {
+			return &OnlyYourselfError{Address: email}
+		}
+		if err != nil {
+			return fmt.Errorf("look up leaver: %w", err)
+		}
+		gThreadID, err := store.SelectInt(ctx, tx,
+			`SELECT "g_thread_id" FROM "thread" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
+			customerID, threadID)
+		if err != nil {
+			return fmt.Errorf("look up thread: %w", err)
+		}
+		member, err := store.SelectInt(ctx, tx,
+			`SELECT COUNT(*) FROM "g_subscription" WHERE "g_thread_id" = ? AND "email" = ? AND `+isMember,
+			gThreadID, email)
+		if err != nil {
+			return fmt.Errorf("look up membership: %w", err)
+		}
+		if gThreadID == 0 || member == 0 {
+			return &NotMemberError{Address: email}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE "g_subscription" SET "left_at" = ? WHERE "g_thread_id" = ? AND "email" = ?`,
+			s.db.Now(), gThreadID, email); err != nil {
+			return fmt.Errorf("leave thread: %w", err)
+		}
+		bodyHTML := fmt.Sprintf("<html><body><p><i>%s left this thread</i></p></body></html>", email)
+		_, err = s.deliver(ctx, tx, customerID, gThreadID, identity{Email: email, Name: name},
+			bodyHTML, nil, &onboarded, []string{email})
+		return err
+	})
+	return err == nil, err
+}
+
+// projectHistory gives a member who has just been given the thread on this
+// Server its earlier messages, so an invitation brings the history (RFC 5.6).
+// except is the message being delivered, which the caller projects.
+func (s *Service) projectHistory(ctx context.Context, tx *sql.Tx, customerID, threadID, gThreadID,
+	except int64) error {
+	earlier, err := store.SelectInts(ctx, tx,
+		`SELECT "id" FROM "g_message" WHERE "g_thread_id" = ? AND "id" <> ? ORDER BY "id"`, gThreadID, except)
+	if err != nil {
+		return fmt.Errorf("list earlier messages: %w", err)
+	}
+	for _, gMessageID := range earlier {
+		projectionID, err := store.Insert(ctx, tx,
+			`INSERT INTO "message" ("customer_id", "thread_id", "g_message_id") VALUES (?,?,?)`,
+			customerID, threadID, gMessageID)
+		if err != nil {
+			return fmt.Errorf("project an earlier message: %w", err)
+		}
+		attachments, err := store.SelectInts(ctx, tx,
+			`SELECT "id" FROM "g_attachment" WHERE "g_message_id" = ?`, gMessageID)
+		if err != nil {
+			return fmt.Errorf("list earlier attachments: %w", err)
+		}
+		for _, gAttachmentID := range attachments {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO "attachment" ("customer_id", "message_id", "g_attachment_id") VALUES (?,?,?)`,
+				customerID, projectionID, gAttachmentID); err != nil {
+				return fmt.Errorf("project an earlier attachment: %w", err)
+			}
+		}
+	}
+	return nil
 }

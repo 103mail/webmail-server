@@ -125,6 +125,23 @@ func TestTimesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSelectInts(t *testing.T) {
+	db := storetest.Open(t)
+	ctx := context.Background()
+	for _, name := range []string{"a", "b"} {
+		if _, err := store.Insert(ctx, db, `INSERT INTO "customer" ("name") VALUES (?)`, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids, err := store.SelectInts(ctx, db, `SELECT "id" FROM "customer" ORDER BY "id"`)
+	if err != nil || len(ids) != 2 || ids[0] >= ids[1] {
+		t.Errorf("SelectInts = %v, %v", ids, err)
+	}
+	if none, err := store.SelectInts(ctx, db, `SELECT "id" FROM "customer" WHERE "id" < 0`); err != nil || len(none) != 0 {
+		t.Errorf("SelectInts with no rows = %v, %v", none, err)
+	}
+}
+
 func TestNowIsUTCWholeSeconds(t *testing.T) {
 	db := storetest.Open(t)
 	db.Clock = func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 600, time.FixedZone("x", 3600)) }

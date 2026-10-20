@@ -198,7 +198,9 @@ func (s *Service) Receive(ctx context.Context, req *Request) (*Accepted, *Reject
 			"envelope", envelope.EnvelopeID, "error", err)
 		return nil, reject(500, ErrServerError, "could not store the message")
 	}
-	if delivered == 0 {
+	// None delivered because none exist is a 404. None delivered because
+	// they all left the thread is nothing to do, and no reason to bounce.
+	if delivered == 0 && len(refused) > 0 {
 		return nil, reject(404, ErrNoRecipients, "no recipient is known here")
 	}
 
@@ -324,6 +326,7 @@ func (s *Service) toInbound(e *Envelope) (*Inbound, *Rejection) {
 		Recipients:   e.Recipients,
 		Members:      e.Members(),
 		Refused:      e.Thread.Refused,
+		Left:         e.Thread.Left,
 	}
 	if e.Thread.InReplyTo != nil {
 		in.InReplyTo = *e.Thread.InReplyTo

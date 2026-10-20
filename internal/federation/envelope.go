@@ -48,6 +48,9 @@ type Thread struct {
 	// The Destination stops treating them as members, if this sender is the
 	// one who added them (RFC 5.3, 6.5).
 	Refused []string `json:"refused,omitempty"`
+	// Left are members on the sender's own domain who left the thread; the
+	// leaver normally sends the notice themselves (RFC 5.6).
+	Left []string `json:"left,omitempty"`
 }
 
 // Message is the content itself.
@@ -195,15 +198,17 @@ func (e *Envelope) Validate(maxAttachmentBytes int64) *Rejection {
 	if len(e.Thread.Members) > maxMembers {
 		return reject(400, ErrSchemaViolation, "thread.members holds more than 1000 addresses")
 	}
-	if len(e.Thread.Refused) > maxRecipients {
-		return reject(400, ErrSchemaViolation, "thread.refused holds more than 100 addresses")
-	}
-	for _, address := range e.Thread.Refused {
-		if !validAddress(address) {
-			return reject(400, ErrSchemaViolation, "refused entry is not an address: "+address)
+	for field, list := range map[string][]string{"thread.refused": e.Thread.Refused, "thread.left": e.Thread.Left} {
+		if len(list) > maxRecipients {
+			return reject(400, ErrSchemaViolation, field+" holds more than 100 addresses")
 		}
-		if slices.ContainsFunc(e.Thread.Members, func(m string) bool { return strings.EqualFold(m, address) }) {
-			return reject(400, ErrSchemaViolation, address+" is both refused and a member")
+		for _, address := range list {
+			if !validAddress(address) {
+				return reject(400, ErrSchemaViolation, field+" entry is not an address: "+address)
+			}
+			if slices.ContainsFunc(e.Thread.Members, func(m string) bool { return strings.EqualFold(m, address) }) {
+				return reject(400, ErrSchemaViolation, address+" is in "+field+" and a member")
+			}
 		}
 	}
 	if len(e.Thread.Members) > 0 {
@@ -213,7 +218,8 @@ func (e *Envelope) Validate(maxAttachmentBytes int64) *Rejection {
 			}
 		}
 		required := e.Recipients
-		if !IsMailerDaemon(e.Message.SenderEmail) {
+		leaving := slices.ContainsFunc(e.Thread.Left, func(l string) bool { return strings.EqualFold(l, e.Message.SenderEmail) })
+		if !IsMailerDaemon(e.Message.SenderEmail) && !leaving {
 			required = append([]string{e.Message.SenderEmail}, required...)
 		}
 		for _, address := range required {

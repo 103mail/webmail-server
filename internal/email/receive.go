@@ -46,6 +46,12 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 		if err != nil {
 			return err
 		}
+		// A recipient who left is not delivered to, even by an envelope
+		// written before their notice reached its sender, and is not refused
+		// either: they exist, they left (RFC 5.6).
+		if mine, err = s.withoutDeparted(ctx, tx, gThreadID, mine); err != nil {
+			return err
+		}
 
 		// Idempotency below the protocol's own dedup: if this exact message is
 		// already here, a retry that raced the dedup record still cannot
@@ -125,7 +131,27 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 // copy of it. It only reads, so a replayed envelope is answered with the list
 // its first delivery produced (RFC 5.4).
 func (s *Service) Undelivered(ctx context.Context, in federation.Inbound) ([]string, error) {
-	return s.undelivered(ctx, s.db, in.MessageFedID, s.localRecipients(in))
+	gThreadID, err := store.SelectInt(ctx, s.db,
+		`SELECT "g_thread_id" FROM "g_message" WHERE "federation_id" = ? LIMIT 1`, in.MessageFedID)
+	if err != nil {
+		return nil, fmt.Errorf("look up federated message: %w", err)
+	}
+	mine, err := s.withoutDeparted(ctx, s.db, gThreadID, s.localRecipients(in))
+	if err != nil {
+		return nil, err
+	}
+	return s.undelivered(ctx, s.db, in.MessageFedID, mine)
+}
+
+// withoutDeparted drops the addresses that left the thread.
+func (s *Service) withoutDeparted(ctx context.Context, q store.Queryer, gThreadID int64,
+	addresses []string) ([]string, error) {
+	departed, err := store.SelectStrings(ctx, q,
+		`SELECT "email" FROM "g_subscription" WHERE "g_thread_id" = ? AND "left_at" IS NOT NULL`, gThreadID)
+	if err != nil {
+		return nil, fmt.Errorf("list departed members: %w", err)
+	}
+	return slices.DeleteFunc(slices.Clone(addresses), func(a string) bool { return slices.Contains(departed, a) }), nil
 }
 
 // localRecipients are the envelope's recipients on a Domain this Server is
@@ -163,24 +189,27 @@ func (s *Service) undelivered(ctx context.Context, q store.Queryer, messageFedID
 	return out, nil
 }
 
-// applyRefusals stops treating the addresses a notice refuses as members, but
-// only those on the sender's own domain: a Domain speaks for its own
-// addresses and no others (RFC 5.3, 6.5).
+// applyRefusals stops treating the addresses a message refuses or reports as
+// departed as members, but only those on the sender's own domain: a Domain
+// speaks for its own addresses and no others (RFC 5.3, 5.6, 6.5).
 func (s *Service) applyRefusals(ctx context.Context, tx *sql.Tx, gThreadID int64, in federation.Inbound) error {
 	origin := federation.DomainOf(in.SenderEmail)
-	args := []any{s.db.Now(), gThreadID}
-	for _, address := range in.Refused {
-		if address = store.Address(address); federation.DomainOf(address) == origin {
-			args = append(args, address)
+	for column, addresses := range map[string][]string{"refused_at": in.Refused, "left_at": in.Left} {
+		args := []any{s.db.Now(), gThreadID}
+		for _, address := range addresses {
+			if address = store.Address(address); federation.DomainOf(address) == origin {
+				args = append(args, address)
+			}
 		}
-	}
-	if len(args) == 2 {
-		return nil
-	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE "g_subscription" SET "refused_at" = ? WHERE "g_thread_id" = ? AND "refused_at" IS NULL `+
-			`AND "email" IN (`+store.Placeholders(len(args)-2)+`)`, args...); err != nil {
-		return fmt.Errorf("apply refusals: %w", err)
+		if len(args) == 2 {
+			continue
+		}
+		// column is one of two literals above, not input.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE "g_subscription" SET "`+column+`" = ? WHERE "g_thread_id" = ? AND `+isMember+` `+
+				`AND "email" IN (`+store.Placeholders(len(args)-2)+`)`, args...); err != nil {
+			return fmt.Errorf("apply %s: %w", column, err)
+		}
 	}
 	return nil
 }
@@ -208,7 +237,7 @@ func (s *Service) tellRefusal(ctx context.Context, tx *sql.Tx, gThreadID int64, 
 	}
 
 	members, err := store.SelectStrings(ctx, tx,
-		`SELECT "email" FROM "g_subscription" WHERE "g_thread_id" = ? AND "refused_at" IS NULL`, gThreadID)
+		`SELECT "email" FROM "g_subscription" WHERE "g_thread_id" = ? AND `+isMember, gThreadID)
 	if err != nil {
 		return fmt.Errorf("list members: %w", err)
 	}
@@ -228,7 +257,7 @@ func (s *Service) tellRefusal(ctx context.Context, tx *sql.Tx, gThreadID int64, 
 	if len(remote) == 0 || s.federation == nil {
 		return nil
 	}
-	return s.federate(ctx, tx, gThreadID, gMessageID, now, sender, members, refused, remote, body, "", nil)
+	return s.federate(ctx, tx, gThreadID, gMessageID, now, sender, members, refused, nil, remote, body, "", nil)
 }
 
 // withoutUnknown drops addresses on this Server's own Domains that have no
@@ -340,6 +369,9 @@ func (s *Service) projectInbound(ctx context.Context, tx *sql.Tx, gThreadID, gMe
 			customerID, folderID, gThreadID)
 		if err != nil {
 			return false, fmt.Errorf("create recipient thread: %w", err)
+		}
+		if err := s.projectHistory(ctx, tx, customerID, threadID, gThreadID, gMessageID); err != nil {
+			return false, err
 		}
 	}
 	projectionID, err := store.Insert(ctx, tx,

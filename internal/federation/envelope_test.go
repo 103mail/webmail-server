@@ -106,6 +106,13 @@ func TestValidateEnforcesFieldRules(t *testing.T) {
 				e.Thread.Refused = append(e.Thread.Refused, "nobody@example.com")
 			}
 		}, 400, ErrSchemaViolation},
+		{"a departed member who is also a member", func(e *Envelope) {
+			e.Thread.Members = []string{"alice@103mail.com", "bob@example.com", "ann@103mail.com"}
+			e.Thread.Left = []string{"ann@103mail.com"}
+		}, 400, ErrSchemaViolation},
+		{"a departed entry that is not an address", func(e *Envelope) {
+			e.Thread.Left = []string{"ann"}
+		}, 400, ErrSchemaViolation},
 		{"too many attachments", func(e *Envelope) {
 			for i := 0; i <= maxAttachments; i++ {
 				e.Attachments = append(e.Attachments, attachmentOf([]byte("x")))
@@ -156,6 +163,17 @@ func TestMailerDaemonIsNeverAMember(t *testing.T) {
 	e.Thread.Members = nil
 	if got := e.Members(); slices.Contains(got, "mailer-daemon@103mail.com") {
 		t.Errorf("Members = %v, includes mailer-daemon", got)
+	}
+}
+
+// A member who leaves sends the notice themselves, so their own address is in
+// thread.left and not among the members (RFC 5.6).
+func TestALeaverIsNotAMember(t *testing.T) {
+	e := validEnvelope()
+	e.Thread.Members = []string{"bob@example.com"}
+	e.Thread.Left = []string{"alice@103mail.com"}
+	if r := e.Validate(DefaultMaxAttachmentBytes); r != nil {
+		t.Fatalf("a leaver's notice was rejected: %v", r)
 	}
 }
 

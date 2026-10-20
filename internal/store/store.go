@@ -212,6 +212,24 @@ func SelectStrings(ctx context.Context, q Queryer, query string, args ...any) ([
 	return out, rows.Err()
 }
 
+// SelectInts returns the first column of every row, as integers.
+func SelectInts(ctx context.Context, q Queryer, query string, args ...any) ([]int64, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var v sql.NullInt64
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v.Int64)
+	}
+	return out, rows.Err()
+}
+
 // SelectCounts returns a map of the first column to the second, for the
 // "SELECT key, COUNT(...) ... GROUP BY key" queries the listings use.
 func SelectCounts(ctx context.Context, q Queryer, query string, args ...any) (map[int64]int64, error) {
