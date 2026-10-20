@@ -10,3 +10,5 @@ certs/
 keys/
 seed/*.sql
 data/
+# The clock offset the end-to-end suite moves forward.
+clock/

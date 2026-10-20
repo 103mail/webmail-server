@@ -14,6 +14,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -119,6 +120,32 @@ func redact(dsn string) string {
 		return dsn
 	}
 	return u.Redacted()
+}
+
+// OffsetClock is a clock that runs ahead of the real one by the duration in
+// the file at path, such as "90s". A test stack sets it through
+// WEBMAIL_CLOCK_FILE so the end-to-end suite can let time pass without
+// waiting: it moves the offset forward and every Domain's retries, budgets
+// and probes see the later time at once. A missing or unreadable file means
+// no offset. Production never sets it.
+func OffsetClock(path string) func() time.Time {
+	return OffsetClockFrom(path, time.Now)
+}
+
+// OffsetClockFrom is OffsetClock over a given real clock, for tests. The file
+// is read on every call, so a change is seen at once.
+func OffsetClockFrom(path string, real func() time.Time) func() time.Time {
+	return func() time.Time {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return real()
+		}
+		offset, err := time.ParseDuration(strings.TrimSpace(string(raw)))
+		if err != nil {
+			return real()
+		}
+		return real().Add(offset)
+	}
 }
 
 // Now is the current time as the application stores it: UTC, whole seconds.

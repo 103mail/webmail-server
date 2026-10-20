@@ -346,9 +346,9 @@ func TestUUIDShape(t *testing.T) {
 // UUIDv7 exists so that identifiers sort by creation time; if they did not, the
 // indexes they sit in would fragment.
 func TestUUIDsSortByTime(t *testing.T) {
-	first, _ := NewUUID()
-	time.Sleep(2 * time.Millisecond)
-	second, _ := NewUUID()
+	at := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	first, _ := newUUIDAt(at)
+	second, _ := newUUIDAt(at.Add(time.Millisecond))
 	if !(first < second) {
 		t.Errorf("%q should sort before %q", first, second)
 	}

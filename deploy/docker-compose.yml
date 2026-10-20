@@ -40,6 +40,10 @@ x-api: &api
     # The API and the worker of a Domain share this file. SQLite runs in WAL
     # mode with a busy timeout, which is what makes that safe.
     WEBMAIL_DSN: sqlite:///data/webmail.db
+    # One clock offset for every Domain, which the end-to-end suite moves
+    # forward to let time pass without waiting (store.OffsetClock). Shared, so
+    # every Domain's timestamps stay comparable. Test stacks only.
+    WEBMAIL_CLOCK_FILE: /etc/webmail/clock/offset
     # Outbound notifications are published to SNS as in production, but the
     # SDK is pointed at the mail sink, which captures them instead of
     # delivering them. The credentials are placeholders the sink ignores. No
@@ -79,6 +83,7 @@ services:
       - ./data/103mail.com:/data
       - ./domain/103mail.com/federation.json:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
+      - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
     networks:
       dom-103mail:
@@ -120,10 +125,12 @@ services:
       # The RFC's 72 hours unless a story shortens it (deploy/README.md).
       WEBMAIL_RETRY_BUDGET: ${RETRY_BUDGET_103MAIL_COM:-72h}
       WEBMAIL_BACKFILL_PROBE: 10s
+      WEBMAIL_WORKER_INTERVAL_SECONDS: "1"
     volumes:
       - ./data/103mail.com:/data
       - ./domain/103mail.com/federation.json:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
+      - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
     healthcheck:
       disable: true
@@ -176,6 +183,7 @@ services:
       - ./data/example.com:/data
       - ./domain/example.com/federation.json:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
+      - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
     networks:
       dom-example:
@@ -217,10 +225,12 @@ services:
       # The RFC's 72 hours unless a story shortens it (deploy/README.md).
       WEBMAIL_RETRY_BUDGET: ${RETRY_BUDGET_EXAMPLE_COM:-72h}
       WEBMAIL_BACKFILL_PROBE: 10s
+      WEBMAIL_WORKER_INTERVAL_SECONDS: "1"
     volumes:
       - ./data/example.com:/data
       - ./domain/example.com/federation.json:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
+      - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
     healthcheck:
       disable: true
@@ -274,6 +284,7 @@ services:
       - ./data/mail.acme.test:/data
       - ./domain/mail.acme.test/federation.json:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
+      - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
     networks:
       dom-acme:
@@ -312,10 +323,12 @@ services:
       # The RFC's 72 hours unless a story shortens it (deploy/README.md).
       WEBMAIL_RETRY_BUDGET: ${RETRY_BUDGET_MAIL_ACME_TEST:-72h}
       WEBMAIL_BACKFILL_PROBE: 10s
+      WEBMAIL_WORKER_INTERVAL_SECONDS: "1"
     volumes:
       - ./data/mail.acme.test:/data
       - ./domain/mail.acme.test/federation.json:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
+      - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
     healthcheck:
       disable: true
@@ -349,6 +362,7 @@ services:
       - ./data/acme.test:/data
       - ./domain/acme.test/federation.json:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
+      - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
     networks:
       dom-parent:
@@ -387,10 +401,12 @@ services:
       # The RFC's 72 hours unless a story shortens it (deploy/README.md).
       WEBMAIL_RETRY_BUDGET: ${RETRY_BUDGET_ACME_TEST:-72h}
       WEBMAIL_BACKFILL_PROBE: 10s
+      WEBMAIL_WORKER_INTERVAL_SECONDS: "1"
     volumes:
       - ./data/acme.test:/data
       - ./domain/acme.test/federation.json:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
+      - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
     healthcheck:
       disable: true

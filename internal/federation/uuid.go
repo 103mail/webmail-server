@@ -18,11 +18,16 @@ import (
 // for the indexes they sit in: envelope ids, thread ids and message ids are all
 // inserted in roughly ascending order, so a B-tree appends rather than splits.
 func NewUUID() (string, error) {
+	return newUUIDAt(time.Now())
+}
+
+// newUUIDAt makes a UUIDv7 for a given moment, so a test can choose it.
+func newUUIDAt(at time.Time) (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("generate uuid: %w", err)
 	}
-	millis := uint64(time.Now().UnixMilli())
+	millis := uint64(at.UnixMilli())
 	// 48-bit big-endian timestamp in the first six bytes.
 	binary.BigEndian.PutUint16(b[0:2], uint16(millis>>32))
 	binary.BigEndian.PutUint32(b[2:6], uint32(millis))

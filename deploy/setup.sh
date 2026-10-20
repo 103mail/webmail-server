@@ -89,6 +89,12 @@ JSON
     fi
 done
 
+# ── The shared clock offset ─────────────────────────────────────────────────
+# Every Domain's API and worker read it (WEBMAIL_CLOCK_FILE). The end-to-end
+# suite moves it forward to let time pass without waiting.
+mkdir -p clock
+[[ -s clock/offset ]] || echo 0s > clock/offset
+
 # ── Attachment directories ──────────────────────────────────────────────────
 for d in "${DOMAINS[@]}"; do
     mkdir -p "data/$d/attachments" "data/$d/documents"

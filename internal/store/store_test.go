@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -139,6 +141,37 @@ func TestSelectInts(t *testing.T) {
 	}
 	if none, err := store.SelectInts(ctx, db, `SELECT "id" FROM "customer" WHERE "id" < 0`); err != nil || len(none) != 0 {
 		t.Errorf("SelectInts with no rows = %v, %v", none, err)
+	}
+}
+
+// The offset clock runs ahead of the real one by what its file says, read
+// again whenever the file changes, which is how a test stack moves time
+// forward without waiting.
+func TestOffsetClock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "offset")
+	real := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	clock := store.OffsetClockFrom(path, func() time.Time { return real })
+	if got := clock(); !got.Equal(real) {
+		t.Errorf("without a file the clock reads %s, want %s", got, real)
+	}
+	if err := os.WriteFile(path, []byte("90s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := clock(); !got.Equal(real.Add(90 * time.Second)) {
+		t.Errorf("with 90s the clock reads %s", got)
+	}
+	if err := os.WriteFile(path, []byte("2h"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A file rewritten within the same second as the last read is still seen.
+	if got := clock(); !got.Equal(real.Add(2 * time.Hour)) {
+		t.Errorf("after moving to 2h the clock reads %s", got)
+	}
+	if err := os.WriteFile(path, []byte("soon"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := clock(); !got.Equal(real) {
+		t.Errorf("an unreadable offset gives %s, want no offset", got)
 	}
 }
 

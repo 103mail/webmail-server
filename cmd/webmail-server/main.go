@@ -103,6 +103,12 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	defer db.Close()
+	// A test stack lets time pass by moving this file forward rather than
+	// waiting (store.OffsetClock). Production never sets it.
+	if path := os.Getenv("WEBMAIL_CLOCK_FILE"); path != "" {
+		db.Clock = store.OffsetClock(path)
+		log.Warn("the clock runs ahead by the offset in a file, for testing only", "file", path)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

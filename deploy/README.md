@@ -205,7 +205,15 @@ worker's retry budget is `${RETRY_BUDGET_<DOMAIN>:-72h}`, for example
 worker-103mail`, which a story uses to see a timeout in minutes. Anything
 shorter than 72 hours is not conformant (RFC 6.4) and is for testing only. The
 workers check every 10 seconds whether a peer they owe messages to is back
-(`WEBMAIL_BACKFILL_PROBE`), where production uses 5 minutes.
+(`WEBMAIL_BACKFILL_PROBE`), where production uses 5 minutes, and drain their
+outbox every second.
+
+**Time can be moved forward.** Every API and worker reads the time as the real
+clock plus the offset in `clock/offset` (`WEBMAIL_CLOCK_FILE`), which
+`setup.sh` creates as `0s`. The end-to-end suite moves it forward to let
+retries, budgets and probes run out without waiting for them. All Domains
+share it, so their timestamps stay comparable. It only ever moves forward; to
+start over, rebuild the databases with `./setup.sh --reseed` and write `0s`.
 
 ## Checking it works
 
