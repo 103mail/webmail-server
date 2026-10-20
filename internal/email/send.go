@@ -348,6 +348,20 @@ func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gTh
 			subCustomerID, sender.Email, sender.Name); err != nil {
 			return 0, fmt.Errorf("record sender as contact: %w", err)
 		}
+		// And the sender sees the recipient as a contact, as for a remote
+		// subscriber above, so writing to someone is enough to find them again.
+		if email != sender.Email && senderCustomerID != 0 {
+			name, err := store.SelectString(ctx, tx,
+				`SELECT "name" FROM "alias" WHERE "email" = ? LIMIT 1`, email)
+			if err != nil {
+				return 0, fmt.Errorf("look up subscriber name: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO "contact" ("customer_id", "email", "name") VALUES (?,?,?) ON CONFLICT DO NOTHING`,
+				senderCustomerID, email, name); err != nil {
+				return 0, fmt.Errorf("record local subscriber as contact: %w", err)
+			}
+		}
 	}
 
 	// senderCustomerID is zero only on the path that accepts mail from outside

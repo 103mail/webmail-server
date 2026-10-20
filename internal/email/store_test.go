@@ -282,6 +282,35 @@ func TestContacts(t *testing.T) {
 	}
 }
 
+func TestRecipientsBecomeContacts(t *testing.T) {
+	f := newFixture(t)
+	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
+	bob, _, _ := f.account("bob@example.test", "Bob")
+	carol, _, _ := f.account("carol@example.test", "Carol")
+
+	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"bob@example.test", "carol@example.test"},
+		"Lunch", "<p>Noon?</p>", nil); err != nil {
+		t.Fatal(err)
+	}
+	has := func(customerID int64, email, name string) bool {
+		return f.count(`SELECT COUNT(*) FROM "contact" WHERE "customer_id" = ? AND "email" = ? AND "name" = ?`,
+			customerID, email, name) == 1
+	}
+	// Writing to someone on this Domain makes them a contact, by name, the
+	// same as writing to someone on another Domain does.
+	if !has(alice, "bob@example.test", "Bob") || !has(alice, "carol@example.test", "Carol") {
+		t.Error("Alice does not have the local recipients she wrote to as contacts")
+	}
+	if !has(bob, "alice@example.test", "Alice") || !has(carol, "alice@example.test", "Alice") {
+		t.Error("the recipients do not have Alice as a contact")
+	}
+	// Being on the same thread is not an exchange: Bob and Carol have not
+	// written to each other.
+	if has(bob, "carol@example.test", "Carol") || has(carol, "bob@example.test", "Bob") {
+		t.Error("co-recipients became each other's contacts")
+	}
+}
+
 func TestFoldersAndMailboxes(t *testing.T) {
 	f := newFixture(t)
 	alice, mailbox, inbox := f.account("alice@example.test", "Alice")
