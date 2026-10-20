@@ -1,16 +1,20 @@
 # Local deployment
 
-Two Domains on one machine, separated the way the federation design describes:
-each is its own Server with its own database, its own API process and its own
-hostname, and neither can reach the other's data.
+Three Domains on one machine, separated the way the federation design
+describes: each is its own Server with its own database, its own API process
+and its own hostname, and none can reach another's data.
 
-| | 103mail.com | example.com |
-| --- | --- | --- |
-| Hostname | `https://webmail.103mail.com` | `https://webmail.example.com` |
-| Bound to | `127.0.0.1:443` | `127.0.0.2:443` |
-| Logins | `maurits@vdschee.nl` | `bob@example.com`, `carol@example.com` |
-| Password | `password` | `password` |
-| Data | a dump of your local `webmail` database | generated fixtures |
+| | 103mail.com | example.com | mail.acme.test |
+| --- | --- | --- | --- |
+| Hostname | `https://webmail.103mail.com` | `https://webmail.example.com` | `https://webmail.mail.acme.test` |
+| Bound to | `127.0.0.1:443` | `127.0.0.2:443` | `127.0.0.3:443` |
+| Logins | `maurits@vdschee.nl` | `bob@example.com`, `carol@example.com` | `erin@mail.acme.test`, `carol@mail.acme.test` |
+| Password | `password` | `password` | `password` |
+| Data | a dump of your local `webmail` database | generated fixtures | generated fixtures |
+
+mail.acme.test is a Domain on a subdomain (RFC 4.1.1), there for the
+end-to-end stories in `../../webmail-e2e`. It has no chat proxy, because chat
+does not federate and the stories do not use it.
 
 Every account uses the password `password`, which is what `../../webmail/syncdata.sh`
 sets on a synced database.
@@ -27,8 +31,11 @@ sets on a synced database.
   dom-example ──────┼─ api-example (Go) ─── data/example.com/webmail.db
                     └─ ws-example (ws2api, chat WebSockets)
 
-  federation ─────── both web containers, aliased to their real federation
-                     hostnames, plus both api containers and both workers
+                    ┌─ web-acme (nginx) ─────── 127.0.0.3:443
+  dom-acme ─────────┴─ api-acme (Go) ────── data/mail.acme.test/webmail.db
+
+  federation ─────── every web container, aliased to its real federation
+                     hostname, plus every api container and every worker
 ```
 
 Per Domain there is also a `worker-*` container. It drains that Domain's
@@ -68,9 +75,10 @@ Then, once:
 
        127.0.0.1  webmail.103mail.com
        127.0.0.2  webmail.example.com
+       127.0.0.3  webmail.mail.acme.test
 
-   The whole of `127.0.0.0/8` is loopback on Linux, which is what lets both
-   Domains have port 443 to themselves and keep URLs with no port suffix.
+   The whole of `127.0.0.0/8` is loopback on Linux, which is what lets every
+   Domain have port 443 to itself and keep URLs with no port suffix.
 
 2. Trust `certs/webmail-local-ca.crt` in your browser. In Chrome that is
    Settings, Privacy and security, Security, Manage certificates, Authorities,

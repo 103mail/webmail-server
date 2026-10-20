@@ -32,11 +32,11 @@ compose builds them by relative path.
 
 `setup.sh` is idempotent and generates the things that cannot be checked in:
 
-- a local CA, plus a leaf certificate for `webmail.103mail.com` and
-  `webmail.example.com`
+- a local CA, plus a leaf certificate for `webmail.103mail.com`,
+  `webmail.example.com` and `webmail.mail.acme.test`
 - an Ed25519 federation keypair per Domain, and the `federation.json` that
   names it
-- the seed SQL for both Domains
+- the seed SQL for every Domain
 - the attachment and document directories
 
 Re-running keeps what already exists, so the CA you trusted stays trusted and
@@ -46,11 +46,12 @@ rebuild only the seed SQL.
 Then, once per machine:
 
 1. Add the Federation hostnames to `/etc/hosts`. All of `127.0.0.0/8` is
-   loopback on Linux, which is what lets both Domains own port 443 and keep
+   loopback on Linux, which is what lets every Domain own port 443 and keep
    URLs with no port suffix:
 
        127.0.0.1  webmail.103mail.com
        127.0.0.2  webmail.example.com
+       127.0.0.3  webmail.mail.acme.test
 
 2. Trust `deploy/certs/webmail-local-ca.crt` in the browser. Chrome: Settings,
    Privacy and security, Security, Manage certificates, Authorities, Import.
@@ -62,8 +63,8 @@ Then, once per machine:
 
        docker compose up -d --build
 
-Eight containers should come up: an API, a worker, a chat proxy and an nginx
-per Domain. There is no database container; each Domain's database is the file
+Eleven containers should come up: an API, a worker and an nginx per Domain,
+and a chat proxy for 103mail.com and example.com. There is no database container; each Domain's database is the file
 `deploy/data/{domain}/webmail.db`, which `setup.sh` built. `docker compose ps` shows them.
 
 ## What the seed data contains

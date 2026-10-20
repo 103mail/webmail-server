@@ -1,0 +1,9 @@
+{
+  "domain": "mail.acme.test",
+  "apiBase": "https://webmail.mail.acme.test/api/v1",
+  "brand": {
+    "name": "Acme Mail",
+    "logo": "/mail.svg",
+    "marketingUrl": "https://acme.test"
+  }
+}

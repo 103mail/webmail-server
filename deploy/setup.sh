@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-DOMAINS=(103mail.com example.com)
+DOMAINS=(103mail.com example.com mail.acme.test)
 CERTS=certs
 CA_KEY="$CERTS/webmail-local-ca.key"
 CA_CRT="$CERTS/webmail-local-ca.crt"
@@ -90,8 +90,9 @@ JSON
 done
 
 # ── Attachment directories ──────────────────────────────────────────────────
-mkdir -p data/103mail.com/attachments data/103mail.com/documents \
-         data/example.com/attachments data/example.com/documents
+for d in "${DOMAINS[@]}"; do
+    mkdir -p "data/$d/attachments" "data/$d/documents"
+done
 
 # 103mail.com is seeded from the local development database, so it needs that
 # database's attachment bytes to go with it. Copied rather than bind-mounted:
@@ -140,6 +141,15 @@ if [[ ! -s seed/example.com.sqlite.sql ]] || $RESEED; then
         > seed/example.com.sqlite.sql
 fi
 
+# A Domain on a subdomain, which the end-to-end stories need (RFC 4.1.1). Its
+# Federation hostname is webmail.mail.acme.test, and it is a Domain of its own,
+# unrelated to acme.test.
+if [[ ! -s seed/mail.acme.test.sqlite.sql ]] || $RESEED; then
+    echo "writing seed/mail.acme.test.sqlite.sql"
+    ./seed.sh mail.acme.test "erin@mail.acme.test" "Erin Bakker" "erin@mail.acme.test" \
+        > seed/mail.acme.test.sqlite.sql
+fi
+
 # ── Databases ───────────────────────────────────────────────────────────────
 # One SQLite file per Domain, in the directory that Domain's API and worker
 # both mount as /data. Built once from the schema and the seed, with every
@@ -167,5 +177,6 @@ echo "done. Next:"
 echo "  1. add to /etc/hosts:"
 echo "       127.0.0.1  webmail.103mail.com"
 echo "       127.0.0.2  webmail.example.com"
+echo "       127.0.0.3  webmail.mail.acme.test"
 echo "  2. trust $PWD/$CA_CRT in your browser"
 echo "  3. docker compose up -d --build"
