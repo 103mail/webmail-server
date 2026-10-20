@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/mevdschee/webmail-server/internal/email"
@@ -284,8 +285,14 @@ func toEmailAttachments(files []attachment) []email.NewAttachment {
 	return out
 }
 
-// result answers 200 with the value, or 500 when the domain reported an error.
+// result answers 200 with the value, 400 naming the addresses when a message
+// was refused for recipients with no account, or 500 for any other error.
 func (s *Server) result(w http.ResponseWriter, r *http.Request, value any, err error) (any, int) {
+	var unknown *email.UnknownRecipientsError
+	if errors.As(err, &unknown) {
+		return map[string]any{"error": "unknown_recipients", "recipients": unknown.Addresses},
+			http.StatusBadRequest
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return nil, 0

@@ -949,10 +949,15 @@ func (s *Service) DeleteFolder(ctx context.Context, customerID, folderID int64) 
 	return err == nil, err
 }
 
+// defaultDomainQuery picks the Domain generated aliases go on: a Domain this
+// Server hosts, never a peer that federation discovered. Peers have no owning
+// customer either, which is why the old "customer_id IS NULL" test now finds
+// them. Without federation nothing is marked local and every row is our own.
+const defaultDomainQuery = `SELECT "name" FROM "domain" ORDER BY "is_local" DESC, "id" LIMIT 1`
+
 // DefaultDomain returns the domain used for generated aliases.
 func (s *Service) DefaultDomain(ctx context.Context, q store.Queryer) (string, error) {
-	return store.SelectString(ctx, q,
-		`SELECT "name" FROM "domain" WHERE "customer_id" IS NULL LIMIT 1`)
+	return store.SelectString(ctx, q, defaultDomainQuery)
 }
 
 // AddMailbox creates a mailbox with an Inbox, a generated alias on the default
@@ -969,8 +974,7 @@ func (s *Service) AddMailbox(ctx context.Context, customerID int64, name, color,
 }
 
 func addMailboxTx(ctx context.Context, tx *sql.Tx, customerID int64, name, color, senderEmail, senderName string) (int64, error) {
-	domain, err := store.SelectString(ctx, tx,
-		`SELECT "name" FROM "domain" WHERE "customer_id" IS NULL LIMIT 1`)
+	domain, err := store.SelectString(ctx, tx, defaultDomainQuery)
 	if err != nil {
 		return 0, fmt.Errorf("look up default domain: %w", err)
 	}

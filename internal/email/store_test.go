@@ -6,8 +6,10 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -217,8 +219,10 @@ func TestThreadLifecycle(t *testing.T) {
 	}
 }
 
-// A recipient with no account is onboarded with a customer of their own and a
-// mailbox that belongs to that customer.
+// With federation off, a recipient outside this Server's Domains is onboarded
+// with a customer of their own, a mailbox that belongs to that customer, and a
+// generated address on this Server's Domain. That is how 103mail.com reaches
+// people elsewhere until it is a Registrar.
 func TestOnboarding(t *testing.T) {
 	f := newFixture(t)
 	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
@@ -226,14 +230,14 @@ func TestOnboarding(t *testing.T) {
 	if _, err := store.Insert(f.ctx, f.db, `INSERT INTO "customer" ("name") VALUES (?)`, "spare"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"dave@example.test"}, "Hello", "<p>Hi</p>", nil); err != nil {
+	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"dave@elsewhere.test"}, "Hello", "<p>Hi</p>", nil); err != nil {
 		t.Fatal(err)
 	}
 	var customerID, userCustomerID int64
 	if err := f.db.QueryRowContext(f.ctx,
 		`SELECT "alias"."customer_id", "user"."customer_id" FROM "alias" `+
 			`JOIN "user" ON "user"."username" = "alias"."email" WHERE "alias"."email" = ?`,
-		"dave@example.test").Scan(&customerID, &userCustomerID); err != nil {
+		"dave@elsewhere.test").Scan(&customerID, &userCustomerID); err != nil {
 		t.Fatal(err)
 	}
 	if customerID != userCustomerID {
@@ -241,6 +245,10 @@ func TestOnboarding(t *testing.T) {
 	}
 	if n := f.count(`SELECT COUNT(*) FROM "thread" WHERE "customer_id" = ?`, customerID); n != 1 {
 		t.Errorf("Dave has %d threads", n)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "alias" WHERE "customer_id" = ? AND "email" LIKE '%@example.test'`,
+		customerID); n != 1 {
+		t.Errorf("Dave has %d generated addresses on this Server's Domain, want 1", n)
 	}
 	var validUntil time.Time
 	if err := f.db.QueryRowContext(f.ctx, `SELECT "valid_until" FROM "token" WHERE "name" = 'Invite'`).
@@ -273,10 +281,10 @@ func TestInvitationCarriesALink(t *testing.T) {
 	f.svc = New(f.db, blob.New(t.TempDir()), notifier, nil, nil)
 	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
 
-	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"dave@example.test"}, "Hello", "<p>Hi</p>", nil); err != nil {
+	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"dave@elsewhere.test"}, "Hello", "<p>Hi</p>", nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(notifier.sent) != 1 || notifier.sent[0].to != "dave@example.test" ||
+	if len(notifier.sent) != 1 || notifier.sent[0].to != "dave@elsewhere.test" ||
 		notifier.sent[0].template != InviteTemplate {
 		t.Fatalf("notifications = %+v, want one invitation to Dave", notifier.sent)
 	}
@@ -285,10 +293,79 @@ func TestInvitationCarriesALink(t *testing.T) {
 		Scan(&token); err != nil {
 		t.Fatal(err)
 	}
-	// The link is on the invitee's own Domain, at its Federation hostname, and
-	// carries nothing but the token (ADR 6).
+	// The link is on the Domain Dave's new account lives on, not on his own
+	// address's domain, and carries nothing but the token (ADR 6).
 	if want := "https://webmail.example.test/invite/" + token; notifier.sent[0].params["link"] != want {
 		t.Errorf("link = %q, want %q", notifier.sent[0].params["link"], want)
+	}
+}
+
+// Writing to an address on this Server's own Domain that has no account is
+// refused before anything is written, naming the address.
+func TestUnknownLocalRecipientsAreRefused(t *testing.T) {
+	f := newFixture(t)
+	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
+	bob, _, bobInbox := f.account("bob@example.test", "Bob")
+
+	_, err := f.svc.AddThread(f.ctx, alice, aliceInbox,
+		[]string{"bob@example.test", "Nobody@Example.test", "ghost@example.test"}, "Hello", "<p>Hi</p>", nil)
+	var unknown *UnknownRecipientsError
+	if !errors.As(err, &unknown) || !slices.Equal(unknown.Addresses, []string{"nobody@example.test", "ghost@example.test"}) {
+		t.Fatalf("AddThread = %v, want the two unknown addresses refused", err)
+	}
+	if threads, _ := f.svc.ListThreads(f.ctx, alice, aliceInbox, ""); len(threads) != 0 {
+		t.Errorf("Alice has %d threads after a refused send", len(threads))
+	}
+	if threads, _ := f.svc.ListThreads(f.ctx, bob, bobInbox, ""); len(threads) != 0 {
+		t.Errorf("Bob got %d threads from a refused send", len(threads))
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "user"`); n != 0 {
+		t.Errorf("%d accounts were created", n)
+	}
+
+	threadID, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"bob@example.test"}, "Hello", "<p>Hi</p>", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.AddSubscriber(f.ctx, alice, threadID, "ghost@example.test"); !errors.As(err, &unknown) {
+		t.Errorf("AddSubscriber = %v, want the unknown address refused", err)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "g_subscription" WHERE "email" = 'ghost@example.test'`); n != 0 {
+		t.Error("the unknown address was subscribed")
+	}
+}
+
+// An incoming envelope for an address on this Domain that has no account
+// delivers nothing and creates nothing, so the inbound endpoint answers 404.
+func TestIncomingMailIsRefusedForUnknownAddresses(t *testing.T) {
+	f := newFixture(t)
+	delivered, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+		Subject: "Hi", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
+		SenderEmail: "pete@peer.test", SenderName: "Pete", Body: "Anyone?", SentAt: f.now,
+		Recipients: []string{"nobody@example.test"},
+	})
+	if err != nil || delivered != 0 {
+		t.Fatalf("DeliverInbound = %d, %v, want nothing delivered", delivered, err)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "user"`); n != 0 {
+		t.Errorf("%d accounts were created", n)
+	}
+}
+
+// A mailbox's generated address is on a Domain this Server hosts, even when
+// the domain table also holds peers that federation discovered.
+func TestGeneratedAddressesStayOnHostedDomains(t *testing.T) {
+	f := newFixture(t)
+	f.exec(`DELETE FROM "domain"`)
+	f.exec(`INSERT INTO "domain" ("name", "is_local") VALUES ('peer.test', FALSE)`)
+	f.exec(`INSERT INTO "domain" ("name", "is_local") VALUES ('example.test', TRUE)`)
+	alice, _, _ := f.account("alice@example.test", "Alice")
+	if n := f.count(`SELECT COUNT(*) FROM "alias" WHERE "customer_id" = ? AND "email" LIKE '%@peer.test'`, alice); n != 0 {
+		t.Errorf("Alice got %d addresses on a peer's domain", n)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "alias" WHERE "customer_id" = ? AND "email" LIKE '%@example.test'`, alice); n != 2 {
+		t.Errorf("Alice has %d addresses on example.test, want hers and a generated one", n)
 	}
 }
 
@@ -430,8 +507,8 @@ func TestInbound(t *testing.T) {
 		Attachments: []federation.InboundAttachment{{FederationID: "0192f0c0-0000-7000-8000-000000000003",
 			FileName: "a/b.txt", MimeType: "text/plain", Data: []byte("x")}},
 	})
-	// With federation off every address is local, so Pete is onboarded too.
-	if err != nil || delivered != 2 {
+	// Pete has no account here, and an incoming message never creates one.
+	if err != nil || delivered != 1 {
 		t.Fatalf("DeliverInbound = %d, %v", delivered, err)
 	}
 	threads, err := f.svc.ListThreads(f.ctx, bob, bobInbox, "")

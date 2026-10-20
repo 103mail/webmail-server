@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/mevdschee/webmail-server/internal/federation"
 	"github.com/mevdschee/webmail-server/internal/mdconv"
@@ -38,6 +40,9 @@ func (s *Service) AddThread(ctx context.Context, customerID, folderID int64,
 		}
 		if sender.Email == "" {
 			return nil
+		}
+		if err := s.refuseUnknown(ctx, tx, subscribers); err != nil {
+			return err
 		}
 
 		gThreadID, err := store.Insert(ctx, tx,
@@ -160,6 +165,9 @@ func (s *Service) AddSubscriber(ctx context.Context, customerID, threadID int64,
 		if sender.Email == "" {
 			return nil
 		}
+		if err := s.refuseUnknown(ctx, tx, []string{email}); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO "g_subscription" ("g_thread_id", "email") VALUES (?,?) ON CONFLICT DO NOTHING`,
 			gThreadID, email); err != nil {
@@ -193,6 +201,9 @@ type invitee struct {
 	CustomerID int64
 	UserID     int64
 	Token      string
+	// Domain is the hosted Domain the new account lives on, which is where
+	// the invitation links to. It is not the domain of Email.
+	Domain string
 }
 
 // senderIdentity returns the default alias of a mailbox.
@@ -275,8 +286,19 @@ func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gTh
 			continue
 		}
 		if email != sender.Email {
-			if err := s.ensureCustomer(ctx, tx, email, "", onboarded); err != nil {
+			// An address on one of our own Domains either has an account or
+			// was refused when the message was written. Only someone outside
+			// them is onboarded, which happens with federation off: that is
+			// how this Server reaches people elsewhere until it is a
+			// Registrar (RFC 8).
+			own, err := s.ownDomain(ctx, tx, email)
+			if err != nil {
 				return 0, err
+			}
+			if !own {
+				if err := s.ensureCustomer(ctx, tx, email, "", onboarded); err != nil {
+					return 0, err
+				}
 			}
 		}
 		mailboxID, err := store.SelectInt(ctx, tx,
@@ -429,6 +451,10 @@ func (s *Service) ensureCustomer(ctx context.Context, tx *sql.Tx, email, name st
 	if _, err := addMailboxTx(ctx, tx, customerID, "", "red", email, name); err != nil {
 		return err
 	}
+	domain, err := s.DefaultDomain(ctx, tx)
+	if err != nil {
+		return err
+	}
 
 	// The invitation link is the only way in for someone with no password, so
 	// it gets a single-use, time-bound token per ADR 6.
@@ -444,18 +470,18 @@ func (s *Service) ensureCustomer(ctx context.Context, tx *sql.Tx, email, name st
 	}
 	if onboarded != nil {
 		*onboarded = append(*onboarded, invitee{
-			Email: email, CustomerID: customerID, UserID: userID, Token: token,
+			Email: email, CustomerID: customerID, UserID: userID, Token: token, Domain: domain,
 		})
 	}
 	return nil
 }
 
-// inviteLink is the way in an invitation carries. Only addresses on a Domain
-// this Server hosts are onboarded, so the invitee's own Domain is served here,
-// at the Federation hostname RFC 1.3 fixes. The URL holds nothing but the
-// token (ADR 6).
+// inviteLink is the way in an invitation carries: the Federation hostname (RFC
+// 1.3) of the Domain the new account lives on. The invitee's own address is on
+// some other domain, which is why they were onboarded. The URL holds nothing
+// but the token (ADR 6).
 func inviteLink(i invitee) string {
-	return federation.BaseURL(federation.DomainOf(i.Email)) + "/invite/" + i.Token
+	return federation.BaseURL(i.Domain) + "/invite/" + i.Token
 }
 
 // inviteValidDays is how long an onboarding link stays usable.
@@ -506,4 +532,61 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// UnknownRecipientsError refuses a message to addresses on this Server's own
+// Domains that have no account. Nothing is written when it is returned.
+type UnknownRecipientsError struct {
+	Addresses []string
+}
+
+func (e *UnknownRecipientsError) Error() string {
+	return "no account for " + strings.Join(e.Addresses, ", ")
+}
+
+// refuseUnknown returns an UnknownRecipientsError naming every address on one
+// of this Server's own Domains that has no account. Such an address is never
+// onboarded: on our own Domain there is nobody else to invite, so the sender
+// is told now rather than by a bounce later.
+func (s *Service) refuseUnknown(ctx context.Context, tx *sql.Tx, addresses []string) error {
+	var unknown []string
+	for _, address := range addresses {
+		if address == "" || slices.Contains(unknown, address) {
+			continue
+		}
+		own, err := s.ownDomain(ctx, tx, address)
+		if err != nil {
+			return err
+		}
+		if !own {
+			continue
+		}
+		known, err := store.SelectInt(ctx, tx,
+			`SELECT COUNT(*) FROM "alias" WHERE "email" = ?`, address)
+		if err != nil {
+			return fmt.Errorf("look up %s: %w", address, err)
+		}
+		if known == 0 {
+			unknown = append(unknown, address)
+		}
+	}
+	if len(unknown) > 0 {
+		return &UnknownRecipientsError{Addresses: unknown}
+	}
+	return nil
+}
+
+// ownDomain reports whether an address is on a Domain this Server hosts. With
+// federation those are the configured Domains. Without it the Server knows no
+// peers, so every domain row is one of its own, as before federation.
+func (s *Service) ownDomain(ctx context.Context, q store.Queryer, address string) (bool, error) {
+	domain := federation.DomainOf(address)
+	if s.federation != nil {
+		return s.federation.IsLocal(domain), nil
+	}
+	n, err := store.SelectInt(ctx, q, `SELECT COUNT(*) FROM "domain" WHERE "name" = ?`, domain)
+	if err != nil {
+		return false, fmt.Errorf("look up domain %s: %w", domain, err)
+	}
+	return n > 0, nil
 }

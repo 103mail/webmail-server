@@ -21,7 +21,8 @@ import (
 // Domains agree on what this thread is (ADR 17).
 //
 // It returns the number of recipients actually delivered to. Zero means none of
-// them are known here and none were onboarded, which the caller answers 404.
+// them have an account here, which the caller answers 404 (RFC 6.5). Incoming
+// mail never creates an account.
 func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (int, error) {
 	// Only the addresses this Server is authoritative for. The envelope names
 	// the whole subscriber set so the thread's membership is complete, but a
@@ -44,7 +45,6 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 	}
 
 	var delivered int
-	var onboarded []invitee
 	sender := identity{Email: in.SenderEmail, Name: in.SenderName}
 
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
@@ -101,12 +101,6 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 		}
 
 		for _, address := range mine {
-			// A local recipient with no account is onboarded here, on their own
-			// Domain, which is the one place it is correct to do so: this is
-			// the Domain their address actually belongs to (design 8).
-			if err := s.ensureCustomer(ctx, tx, address, "", &onboarded); err != nil {
-				return err
-			}
 			ok, err := s.projectInbound(ctx, tx, gThreadID, gMessageID, gAttachmentIDs, address, sender)
 			if err != nil {
 				return err
@@ -120,7 +114,6 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 	if err != nil {
 		return 0, err
 	}
-	s.invite(ctx, sender, in.Subject, onboarded)
 	return delivered, nil
 }
 
