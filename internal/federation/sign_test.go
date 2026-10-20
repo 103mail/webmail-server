@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mevdschee/webmail-server/internal/store/storetest"
 )
 
 func testKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
@@ -176,15 +178,18 @@ func writeKey(t *testing.T, path string) ed25519.PrivateKey {
 }
 
 // A Domain that rotated signs with its new key and publishes the old one as a
-// previous key, so peers that pinned it keep trusting us (RFC 9.5).
-func TestRotatedKeysArePublishedAsPrevious(t *testing.T) {
+// previous key for 48 hours, so peers that pinned it keep trusting us, and
+// not after (RFC 9.5).
+func TestRotatedKeysArePublishedForTheWindow(t *testing.T) {
 	dir := t.TempDir()
 	current := writeKey(t, filepath.Join(dir, "new.pem"))
 	old := writeKey(t, filepath.Join(dir, "old.pem"))
+	retired := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
 	config := filepath.Join(dir, "federation.json")
 	if err := os.WriteFile(config, []byte(`{"domains":[{"domain":"example.test",`+
 		`"privateKeyFile":"`+filepath.Join(dir, "new.pem")+`",`+
-		`"previousKeyFiles":["`+filepath.Join(dir, "old.pem")+`"]}]}`), 0o600); err != nil {
+		`"previousKeys":[{"file":"`+filepath.Join(dir, "old.pem")+`","retiredAt":"`+
+		retired.Format(time.RFC3339)+`"}]}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("WEBMAIL_FEDERATION_CONFIG", config)
@@ -192,7 +197,10 @@ func TestRotatedKeysArePublishedAsPrevious(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(nil, cfg, nil, nil)
+	db := storetest.Open(t)
+	now := retired.Add(47 * time.Hour)
+	db.Clock = func() time.Time { return now }
+	s, err := New(db, cfg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,9 +213,32 @@ func TestRotatedKeysArePublishedAsPrevious(t *testing.T) {
 	}
 	want := []string{EncodePublicKey(old.Public().(ed25519.PublicKey))}
 	if !slices.Equal(d.PreviousPublicKeys, want) {
-		t.Errorf("previous_public_keys = %v, want the old key", d.PreviousPublicKeys)
+		t.Errorf("47 hours on, previous_public_keys = %v, want the old key", d.PreviousPublicKeys)
 	}
 	if err := d.Validate("example.test"); err != nil {
 		t.Errorf("the descriptor does not validate: %v", err)
+	}
+
+	now = retired.Add(RotationWindow)
+	if d, _ := s.DescriptorFor("example.test"); len(d.PreviousPublicKeys) != 0 {
+		t.Errorf("48 hours on, previous_public_keys = %v, want none", d.PreviousPublicKeys)
+	}
+}
+
+// A previous key without the time it was retired is a config error: there
+// would be no telling when it has to stop being published.
+func TestPreviousKeysNeedARetiredTime(t *testing.T) {
+	dir := t.TempDir()
+	writeKey(t, filepath.Join(dir, "new.pem"))
+	writeKey(t, filepath.Join(dir, "old.pem"))
+	config := filepath.Join(dir, "federation.json")
+	if err := os.WriteFile(config, []byte(`{"domains":[{"domain":"example.test",`+
+		`"privateKeyFile":"`+filepath.Join(dir, "new.pem")+`",`+
+		`"previousKeys":[{"file":"`+filepath.Join(dir, "old.pem")+`"}]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WEBMAIL_FEDERATION_CONFIG", config)
+	if _, err := LoadConfig(); err == nil {
+		t.Error("a previous key without retiredAt was accepted")
 	}
 }

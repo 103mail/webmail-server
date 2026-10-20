@@ -72,14 +72,29 @@ type LocalDomain struct {
 	// because peers pin keys per DNS domain and one Domain's compromise must
 	// not let an attacker speak for the others co-hosted with it (RFC 4.1).
 	PrivateKeyFile string `json:"privateKeyFile"`
-	// PreviousKeyFiles are the keys this Domain signed with before its last
-	// rotation. Only their public halves are used: they are published as
-	// previous_public_keys so peers that pinned an old key keep trusting us,
-	// and must be removed within 48 hours of the rotation (RFC 9.5).
-	PreviousKeyFiles []string `json:"previousKeyFiles"`
+	// PreviousKeys are the keys this Domain signed with before, each with
+	// the time it was retired. Only their public halves are used: each is
+	// published as a previous key for 48 hours after it was retired, so peers
+	// that pinned it keep trusting us, and never after (RFC 9.5).
+	PreviousKeys []PreviousKey `json:"previousKeys"`
 
 	key      ed25519.PrivateKey
-	previous []ed25519.PublicKey
+	previous []retiredKey
+}
+
+// PreviousKey is a retired signing key in the federation config.
+type PreviousKey struct {
+	File string `json:"file"`
+	// RetiredAt is when the key was replaced, RFC 3339.
+	RetiredAt string `json:"retiredAt"`
+}
+
+// RotationWindow is how long a retired key is still published (RFC 9.5).
+const RotationWindow = 48 * time.Hour
+
+type retiredKey struct {
+	key       ed25519.PublicKey
+	retiredAt time.Time
 }
 
 // Config is the federation configuration, read from a JSON file so that a
@@ -160,16 +175,20 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("domain %s: %w", d.Domain, err)
 		}
 		d.key = key
-		if len(d.PreviousKeyFiles) > maxPreviousKeys {
+		if len(d.PreviousKeys) > maxPreviousKeys {
 			return nil, fmt.Errorf("domain %s lists %d previous keys, at most %d may be published",
-				d.Domain, len(d.PreviousKeyFiles), maxPreviousKeys)
+				d.Domain, len(d.PreviousKeys), maxPreviousKeys)
 		}
-		for _, file := range d.PreviousKeyFiles {
-			old, err := LoadPrivateKey(file)
+		for _, p := range d.PreviousKeys {
+			old, err := LoadPrivateKey(p.File)
 			if err != nil {
 				return nil, fmt.Errorf("domain %s previous key: %w", d.Domain, err)
 			}
-			d.previous = append(d.previous, old.Public().(ed25519.PublicKey))
+			retiredAt, err := time.Parse(time.RFC3339, p.RetiredAt)
+			if err != nil {
+				return nil, fmt.Errorf("domain %s previous key %s has no retiredAt time: %w", d.Domain, p.File, err)
+			}
+			d.previous = append(d.previous, retiredKey{key: old.Public().(ed25519.PublicKey), retiredAt: retiredAt})
 		}
 	}
 	return &cfg, nil
@@ -440,7 +459,7 @@ func (s *Service) DescriptorFor(domain string) (*Descriptor, bool) {
 	return &Descriptor{
 		Domain:             d.Domain,
 		PublicKey:          EncodePublicKey(d.key.Public().(ed25519.PublicKey)),
-		PreviousPublicKeys: d.previousPublicKeys(),
+		PreviousPublicKeys: d.previousPublicKeys(s.now()),
 		Versions:           []string{Version},
 		Registrar:          false,
 		MaxEnvelopeBytes:   s.cfg.MaxEnvelopeBytes,
@@ -448,13 +467,26 @@ func (s *Service) DescriptorFor(domain string) (*Descriptor, bool) {
 	}, true
 }
 
-// previousPublicKeys renders the keys this Domain rotated away from.
-func (d *LocalDomain) previousPublicKeys() []string {
+// previousPublicKeys renders the keys this Domain rotated away from that are
+// still inside the rotation window at now. A key past it is left out even if
+// the config still names it, because publishing it then is forbidden.
+func (d *LocalDomain) previousPublicKeys(now time.Time) []string {
 	out := []string{}
-	for _, key := range d.previous {
-		out = append(out, EncodePublicKey(key))
+	for _, p := range d.previous {
+		if now.Before(p.retiredAt.Add(RotationWindow)) {
+			out = append(out, EncodePublicKey(p.key))
+		}
 	}
 	return out
+}
+
+// now is the time by the database clock, which a test stack can move, or
+// the real time for a Service without a database.
+func (s *Service) now() time.Time {
+	if s.db == nil {
+		return time.Now()
+	}
+	return s.db.Now()
 }
 
 // OriginFor picks the local Domain an address sends as. An address on a Domain
