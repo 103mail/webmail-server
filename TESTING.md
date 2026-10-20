@@ -63,8 +63,8 @@ Then, once per machine:
 
        docker compose up -d --build
 
-Eleven containers should come up: an API, a worker and an nginx per Domain,
-and a chat proxy for 103mail.com and example.com. There is no database container; each Domain's database is the file
+Twelve containers should come up: an API, a worker and an nginx per Domain,
+a chat proxy for 103mail.com and example.com, and the mail sink. There is no database container; each Domain's database is the file
 `deploy/data/{domain}/webmail.db`, which `setup.sh` built. `docker compose ps` shows them.
 
 ## What the seed data contains
@@ -491,9 +491,10 @@ if you deleted `certs/`, re-import the new `webmail-local-ca.crt`.
 PKI certificate, and these are signed by a local CA. Nothing to work around
 locally.
 
-**Email never arrives at a real address.** By design. No SNS or SES variables
-are set, so outbound is recorded in memory by `mailer.Recorder` and the inbound
-webhook answers `503`. The local stack cannot mail a real person.
+**Email never arrives at a real address.** By design. Outbound is published
+to the mail sink instead of SNS, and the inbound webhook answers `503`. The
+local stack cannot mail a real person. To see what would have been sent, such
+as an invitation, read `curl http://127.0.0.1:8025/messages`.
 
 ## Automated tests
 

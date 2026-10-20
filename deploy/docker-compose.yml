@@ -39,9 +39,16 @@ x-api: &api
     # The API and the worker of a Domain share this file. SQLite runs in WAL
     # mode with a busy timeout, which is what makes that safe.
     WEBMAIL_DSN: sqlite:///data/webmail.db
-    # No SNS or SES variables: outbound notifications are recorded in memory by
-    # mailer.Recorder and the inbound webhook answers 503, so a local stack
-    # cannot mail a real person.
+    # Outbound notifications are published to SNS as in production, but the
+    # SDK is pointed at the mail sink, which captures them instead of
+    # delivering them. The credentials are placeholders the sink ignores. No
+    # SES variables, so the inbound webhook answers 503. Either way a local
+    # stack cannot mail a real person.
+    AWS_ENDPOINT_URL_SNS: http://mailsink:4566
+    AWS_ACCESS_KEY_ID: mailsink
+    AWS_SECRET_ACCESS_KEY: mailsink
+    AWS_EC2_METADATA_DISABLED: "true"
+    WEBMAIL_SNS_REGION: eu-west-1
 
 x-web: &web
   build:
@@ -57,6 +64,7 @@ services:
     environment:
       <<: *api-env
       WEBMAIL_ALLOWED_ORIGINS: https://webmail.103mail.com
+      WEBMAIL_SNS_TOPIC_ARN: arn:aws:sns:eu-west-1:000000000000:103mail-com
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
       WEBMAIL_WS_PUSH_URL: http://ws:7001
     volumes:
@@ -137,6 +145,7 @@ services:
     environment:
       <<: *api-env
       WEBMAIL_ALLOWED_ORIGINS: https://webmail.example.com
+      WEBMAIL_SNS_TOPIC_ARN: arn:aws:sns:eu-west-1:000000000000:example-com
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
       WEBMAIL_WS_PUSH_URL: http://ws:7001
     volumes:
@@ -219,6 +228,7 @@ services:
     environment:
       <<: *api-env
       WEBMAIL_ALLOWED_ORIGINS: https://webmail.mail.acme.test
+      WEBMAIL_SNS_TOPIC_ARN: arn:aws:sns:eu-west-1:000000000000:mail-acme-test
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
     volumes:
       - ./data/mail.acme.test:/data
@@ -268,6 +278,23 @@ services:
     networks:
       dom-acme:
       federation:
+
+  # ── Shared ─────────────────────────────────────────────────────────────────
+  # Stands in for SNS for every Domain, so notification email is captured
+  # rather than sent. The end-to-end stories read it at
+  # http://127.0.0.1:8025/messages to find invitations and to prove that no
+  # message content left any Domain by email.
+  mailsink:
+    build:
+      context: ..
+      dockerfile: deploy/mailsink.Dockerfile
+    image: webmail-mailsink:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8025:4566"
+    networks:
+      federation:
+        aliases: [mailsink]
 
 networks:
   dom-103mail:

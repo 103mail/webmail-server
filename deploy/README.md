@@ -171,9 +171,17 @@ DV at minimum. These are signed by a local CA that only your machine trusts. A
 peer implementing the RFC would refuse them, which is correct behaviour and not
 a problem to work around locally.
 
-**Email cannot leave.** No SNS or SES variables are set, so outbound
-notifications are recorded in memory by `mailer.Recorder` and the inbound
-webhook answers 503. The stack cannot mail a real person.
+**Email cannot leave.** Each API publishes outbound notifications to SNS as
+in production, but `AWS_ENDPOINT_URL_SNS` points it at the `mailsink`
+container, which captures them instead (`mailsink/`). No SES variables are set,
+so the inbound webhook answers 503. The stack cannot mail a real person.
+
+To read what every Domain has sent, newest last:
+
+    curl http://127.0.0.1:8025/messages
+
+`?after=N` lists only what came after message N. The sink keeps messages in
+memory, so restarting it empties it.
 
 ## Checking it works
 
