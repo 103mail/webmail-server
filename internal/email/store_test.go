@@ -252,6 +252,46 @@ func TestOnboarding(t *testing.T) {
 	}
 }
 
+// notified records what was handed to the notifier.
+type notified struct {
+	to       string
+	template string
+	params   map[string]string
+}
+
+type fakeNotifier struct{ sent []notified }
+
+func (n *fakeNotifier) Send(ctx context.Context, customerID *int64, toName, toEmail, templateName,
+	preferredLanguage string, params map[string]string, bccEmail string) error {
+	n.sent = append(n.sent, notified{to: toEmail, template: templateName, params: params})
+	return nil
+}
+
+func TestInvitationCarriesALink(t *testing.T) {
+	f := newFixture(t)
+	notifier := &fakeNotifier{}
+	f.svc = New(f.db, blob.New(t.TempDir()), notifier, nil, nil)
+	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
+
+	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"dave@example.test"}, "Hello", "<p>Hi</p>", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(notifier.sent) != 1 || notifier.sent[0].to != "dave@example.test" ||
+		notifier.sent[0].template != InviteTemplate {
+		t.Fatalf("notifications = %+v, want one invitation to Dave", notifier.sent)
+	}
+	var token string
+	if err := f.db.QueryRowContext(f.ctx, `SELECT "value" FROM "token" WHERE "name" = 'Invite'`).
+		Scan(&token); err != nil {
+		t.Fatal(err)
+	}
+	// The link is on the invitee's own Domain, at its Federation hostname, and
+	// carries nothing but the token (ADR 6).
+	if want := "https://webmail.example.test/invite/" + token; notifier.sent[0].params["link"] != want {
+		t.Errorf("link = %q, want %q", notifier.sent[0].params["link"], want)
+	}
+}
+
 func TestContacts(t *testing.T) {
 	f := newFixture(t)
 	alice, _, _ := f.account("alice@example.test", "Alice")

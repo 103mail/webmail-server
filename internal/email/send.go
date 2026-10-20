@@ -450,6 +450,14 @@ func (s *Service) ensureCustomer(ctx context.Context, tx *sql.Tx, email, name st
 	return nil
 }
 
+// inviteLink is the way in an invitation carries. Only addresses on a Domain
+// this Server hosts are onboarded, so the invitee's own Domain is served here,
+// at the Federation hostname RFC 1.3 fixes. The URL holds nothing but the
+// token (ADR 6).
+func inviteLink(i invitee) string {
+	return federation.BaseURL(federation.DomainOf(i.Email)) + "/invite/" + i.Token
+}
+
 // inviteValidDays is how long an onboarding link stays usable.
 const inviteValidDays = 30
 
@@ -481,6 +489,7 @@ func (s *Service) invite(ctx context.Context, sender identity, subject string, i
 				"senderEmail": sender.Email,
 				"subject":     subject,
 				"token":       i.Token,
+				"link":        inviteLink(i),
 			}, "")
 		if err != nil {
 			// An invitation that did not go out is a person who never learns
