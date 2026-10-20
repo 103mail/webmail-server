@@ -96,6 +96,20 @@ func TestRequestFromNormalisesTheSender(t *testing.T) {
 	}
 }
 
+// The Destination is the domain whose Federation hostname the request was
+// sent to, which is what recipients are checked against (RFC 5.3).
+func TestRequestFromReadsTheDestinationFromHost(t *testing.T) {
+	req := inboundRequest(`{}`, nil)
+	req.Host = "Webmail.Mail.Acme.test:443"
+	parsed, r := RequestFrom(req, 1<<20)
+	if r != nil {
+		t.Fatalf("rejected: %v", r)
+	}
+	if parsed.Destination != "mail.acme.test" {
+		t.Errorf("destination = %q, want mail.acme.test", parsed.Destination)
+	}
+}
+
 // Given a Date outside the skew window in either direction, when it is checked,
 // then the request is stale. A request from the future is as suspicious as one
 // from the past.

@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 
 	"github.com/mevdschee/webmail-server/internal/federation"
 )
@@ -32,7 +31,7 @@ func (s *Server) handleWellKnown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	domain := domainFromHost(r.Host)
+	domain := federation.DomainFromHost(r.Host)
 	descriptor, ok := s.federation.DescriptorFor(domain)
 	if !ok {
 		// Answering for a hostname we are not authoritative for would let a
@@ -95,17 +94,6 @@ func (s *Server) rejectFederation(w http.ResponseWriter, r *http.Request, reject
 		body["detail"] = rejection.Detail
 	}
 	s.respondJSON(w, rejection.Status, body)
-}
-
-// domainFromHost turns a Federation hostname back into the DNS domain it serves.
-// Every endpoint lives at webmail.{domain} and nowhere else, so anything not
-// carrying that label is not a Domain of ours (RFC 1.3).
-func domainFromHost(host string) string {
-	if i := strings.LastIndex(host, ":"); i > 0 && !strings.Contains(host[i:], "]") {
-		host = host[:i]
-	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	return strings.TrimPrefix(host, "webmail.")
 }
 
 func (s *Server) respondJSON(w http.ResponseWriter, status int, body any) {

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"os"
@@ -384,6 +385,35 @@ func TestPartlyUnknownEnvelopeReportsTheUnknown(t *testing.T) {
 	}
 }
 
+// The thread's members come from the envelope, so a reply written here reaches
+// members on Domains that were not among the recipients (RFC 5.3).
+func TestIncomingMembersBecomeSubscribers(t *testing.T) {
+	f := newFixture(t)
+	bob, _, bobInbox := f.account("bob@example.test", "Bob")
+	delivered, _, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+		Subject: "Three Domains", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
+		SenderEmail: "pete@peer.test", SenderName: "Pete", Body: "Hi all", SentAt: f.now,
+		Recipients: []string{"bob@example.test"},
+		Members:    []string{"pete@peer.test", "bob@example.test", "erin@third.test"},
+	})
+	if err != nil || delivered != 1 {
+		t.Fatalf("DeliverInbound = %d, %v", delivered, err)
+	}
+	threads, err := f.svc.ListThreads(f.ctx, bob, bobInbox, "")
+	if err != nil || len(threads) != 1 {
+		t.Fatalf("Bob has %d threads, %v", len(threads), err)
+	}
+	var subscribers []string
+	for _, p := range threads[0].Subscribers {
+		subscribers = append(subscribers, p.Email)
+	}
+	slices.Sort(subscribers)
+	if !slices.Equal(subscribers, []string{"erin@third.test", "pete@peer.test"}) {
+		t.Errorf("Bob sees subscribers %v, want Pete and Erin", subscribers)
+	}
+}
+
 // A mailbox's generated address is on a Domain this Server hosts, even when
 // the domain table also holds peers that federation discovered.
 func TestGeneratedAddressesStayOnHostedDomains(t *testing.T) {
@@ -607,12 +637,38 @@ func TestRemoteRecipientsAreQueued(t *testing.T) {
 	fed.Attach(f.svc)
 	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
 
-	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"Bob@Peer.test", "carol@peer.test"},
+	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"Bob@Peer.test", "carol@peer.test", "dave@other.test"},
 		"Across", "<p>Hi</p>", []NewAttachment{{FileName: "a.txt", MimeType: "text/plain", FileData: []byte("a")}}); err != nil {
 		t.Fatal(err)
 	}
 	if n := f.count(`SELECT COUNT(*) FROM "federation_outbox" WHERE "peer_domain" = 'peer.test' AND "status" = 'pending'`); n != 1 {
 		t.Errorf("%d envelopes queued for peer.test, want one for both recipients", n)
+	}
+	// Each envelope names only its Destination's recipients (RFC 5.3), and
+	// every one carries the whole membership so replies reach everyone.
+	for peer, want := range map[string][]string{
+		"peer.test":  {"bob@peer.test", "carol@peer.test"},
+		"other.test": {"dave@other.test"},
+	} {
+		body, err := store.SelectString(f.ctx, f.db,
+			`SELECT "body" FROM "federation_outbox" WHERE "peer_domain" = ?`, peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope federation.Envelope
+		if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		recipients := slices.Clone(envelope.Recipients)
+		slices.Sort(recipients)
+		if !slices.Equal(recipients, want) {
+			t.Errorf("the envelope to %s names %v, want %v", peer, recipients, want)
+		}
+		members := slices.Clone(envelope.Thread.Members)
+		slices.Sort(members)
+		if !slices.Equal(members, []string{"alice@example.test", "bob@peer.test", "carol@peer.test", "dave@other.test"}) {
+			t.Errorf("the envelope to %s has members %v", peer, members)
+		}
 	}
 	if n := f.count(`SELECT COUNT(*) FROM "g_thread" WHERE "federation_id" IS NOT NULL`); n != 1 {
 		t.Error("the thread has no federation id")

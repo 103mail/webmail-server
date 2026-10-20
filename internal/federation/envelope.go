@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -39,6 +40,10 @@ type Thread struct {
 	FederationID string  `json:"federation_id"`
 	Subject      string  `json:"subject"`
 	InReplyTo    *string `json:"in_reply_to"`
+	// Members is everyone on the thread, on every Domain. Recipients are only
+	// the Destination's share, so this is how a Destination learns who else a
+	// reply written there has to reach (RFC 5.3).
+	Members []string `json:"members,omitempty"`
 }
 
 // Message is the content itself.
@@ -75,6 +80,7 @@ const (
 	maxMimeTypeBytes   = 255
 	maxAttachments     = 64
 	maxRecipients      = 100
+	maxMembers         = 1000
 )
 
 // Error codes from RFC 6.3. They are the `error` field of a failure response
@@ -178,6 +184,49 @@ func (e *Envelope) Validate(maxAttachmentBytes int64) *Rejection {
 	for _, address := range e.Recipients {
 		if !validAddress(address) {
 			return reject(400, ErrSchemaViolation, "recipient is not an address: "+address)
+		}
+	}
+
+	if len(e.Thread.Members) > maxMembers {
+		return reject(400, ErrSchemaViolation, "thread.members holds more than 1000 addresses")
+	}
+	if len(e.Thread.Members) > 0 {
+		for _, address := range e.Thread.Members {
+			if !validAddress(address) {
+				return reject(400, ErrSchemaViolation, "member is not an address: "+address)
+			}
+		}
+		for _, address := range append([]string{e.Message.SenderEmail}, e.Recipients...) {
+			if !slices.ContainsFunc(e.Thread.Members, func(m string) bool { return strings.EqualFold(m, address) }) {
+				return reject(400, ErrSchemaViolation, "thread.members leaves out "+address)
+			}
+		}
+	}
+	return nil
+}
+
+// Members is everyone on the thread, lowercase and each once. A peer that
+// leaves thread.members out means the sender and the recipients (RFC 5.3).
+func (e *Envelope) Members() []string {
+	members := e.Thread.Members
+	if len(members) == 0 {
+		members = append([]string{e.Message.SenderEmail}, e.Recipients...)
+	}
+	out := make([]string, 0, len(members))
+	for _, m := range members {
+		if m = strings.ToLower(strings.TrimSpace(m)); !slices.Contains(out, m) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// RecipientsOn checks that every recipient is on the Destination's own DNS
+// domain. A parent and its subdomain are different Domains (RFC 4.1.1, 5.3).
+func (e *Envelope) RecipientsOn(domain string) *Rejection {
+	for _, address := range e.Recipients {
+		if !strings.EqualFold(DomainOf(address), domain) {
+			return reject(400, ErrSchemaViolation, "recipient "+address+" is not on "+domain)
 		}
 	}
 	return nil

@@ -30,6 +30,7 @@ type Outbound struct {
 	BodyHTML     string
 	SentAt       time.Time
 	Recipients   []string
+	Members      []string
 	Attachments  []OutboundAttachment
 	// RelatedID is the local g_message id, kept so a bounce can name the
 	// message that failed.
@@ -66,6 +67,7 @@ func (s *Service) Enqueue(ctx context.Context, tx *sql.Tx, out Outbound) error {
 		Thread: Thread{
 			FederationID: out.ThreadFedID,
 			Subject:      out.Subject,
+			Members:      out.Members,
 		},
 		Message: Message{
 			FederationID: out.MessageFedID,

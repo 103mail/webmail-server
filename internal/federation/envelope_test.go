@@ -78,6 +78,21 @@ func TestValidateEnforcesFieldRules(t *testing.T) {
 			}
 		}, 400, ErrSchemaViolation},
 		{"a recipient that is not an address", func(e *Envelope) { e.Recipients = []string{"bob"} }, 400, ErrSchemaViolation},
+		{"too many members", func(e *Envelope) {
+			e.Thread.Members = []string{"alice@103mail.com", "bob@example.com"}
+			for i := 0; i < maxMembers; i++ {
+				e.Thread.Members = append(e.Thread.Members, "carol@example.org")
+			}
+		}, 400, ErrSchemaViolation},
+		{"a member that is not an address", func(e *Envelope) {
+			e.Thread.Members = []string{"alice@103mail.com", "bob@example.com", "erin"}
+		}, 400, ErrSchemaViolation},
+		{"members without the sender", func(e *Envelope) {
+			e.Thread.Members = []string{"bob@example.com"}
+		}, 400, ErrSchemaViolation},
+		{"members without a recipient", func(e *Envelope) {
+			e.Thread.Members = []string{"alice@103mail.com", "erin@mail.acme.test"}
+		}, 400, ErrSchemaViolation},
 		{"too many attachments", func(e *Envelope) {
 			for i := 0; i <= maxAttachments; i++ {
 				e.Attachments = append(e.Attachments, attachmentOf([]byte("x")))
@@ -96,6 +111,39 @@ func TestValidateEnforcesFieldRules(t *testing.T) {
 				t.Errorf("got %d %s, want %d %s", r.Status, r.Code, tt.status, tt.code)
 			}
 		})
+	}
+}
+
+// Members name everyone on the thread, on any Domain, and fall back to the
+// sender and the recipients when a peer leaves them out (RFC 5.3).
+func TestMembersOfAThread(t *testing.T) {
+	e := validEnvelope()
+	if got := e.Members(); strings.Join(got, ",") != "alice@103mail.com,bob@example.com" {
+		t.Errorf("Members without thread.members = %v", got)
+	}
+	e.Thread.Members = []string{"Alice@103mail.com", "bob@example.com", "erin@mail.acme.test"}
+	if r := e.Validate(DefaultMaxAttachmentBytes); r != nil {
+		t.Fatalf("members on three Domains were rejected: %v", r)
+	}
+	if got := e.Members(); strings.Join(got, ",") != "alice@103mail.com,bob@example.com,erin@mail.acme.test" {
+		t.Errorf("Members = %v", got)
+	}
+}
+
+// Recipients name only the Domain the envelope was sent to (RFC 5.3).
+func TestRecipientsMustBeOnTheDestination(t *testing.T) {
+	e := validEnvelope()
+	if r := e.RecipientsOn("example.com"); r != nil {
+		t.Errorf("recipients on the Destination were refused: %v", r)
+	}
+	e.Recipients = []string{"bob@example.com", "erin@mail.acme.test"}
+	if r := e.RecipientsOn("example.com"); r == nil || r.Status != 400 || r.Code != ErrSchemaViolation {
+		t.Errorf("a recipient on another Domain was accepted: %v", r)
+	}
+	// A parent is not its subdomain (RFC 4.1.1).
+	e.Recipients = []string{"pete@acme.test"}
+	if r := e.RecipientsOn("mail.acme.test"); r == nil {
+		t.Error("a recipient on the parent domain was accepted")
 	}
 }
 

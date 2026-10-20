@@ -18,6 +18,9 @@ import (
 // verification path is testable without a server, and so that the HTTP handler
 // stays a translation layer with no protocol rules of its own.
 type Request struct {
+	// Destination is the DNS domain the request was sent to, read from the
+	// Federation hostname in Host (RFC 1.3).
+	Destination     string
 	ContentType     string
 	ContentEncoding string
 	Version         string
@@ -59,6 +62,7 @@ func RequestFrom(r *http.Request, maxBytes int64) (*Request, *Rejection) {
 	}
 
 	return &Request{
+		Destination: DomainFromHost(r.Host),
 		ContentType: mediaType,
 		Version:     r.Header.Get("X-Federation-Version"),
 		Sender:      strings.ToLower(strings.TrimSpace(r.Header.Get("X-Federation-Sender"))),
@@ -157,6 +161,9 @@ func (s *Service) Receive(ctx context.Context, req *Request) (*Accepted, *Reject
 	}
 	if !strings.EqualFold(DomainOf(envelope.Message.SenderEmail), req.Sender) {
 		return nil, reject(401, ErrSenderMismatch, "sender_email is not on the sending Domain")
+	}
+	if r := envelope.RecipientsOn(req.Destination); r != nil {
+		return nil, r
 	}
 
 	inbound, r := s.toInbound(&envelope)
@@ -314,6 +321,7 @@ func (s *Service) toInbound(e *Envelope) (*Inbound, *Rejection) {
 		BodyHTML:     e.Message.BodyHTML,
 		SentAt:       sentAt,
 		Recipients:   e.Recipients,
+		Members:      e.Members(),
 	}
 	if e.Thread.InReplyTo != nil {
 		in.InReplyTo = *e.Thread.InReplyTo

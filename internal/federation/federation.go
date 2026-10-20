@@ -174,17 +174,19 @@ type Deliverer interface {
 
 // Inbound is an accepted envelope, decoded and checked, ready to be written.
 type Inbound struct {
-	OriginDomain  string
-	ThreadFedID   string
-	InReplyTo     string
-	Subject       string
-	MessageFedID  string
-	SenderEmail   string
-	SenderName    string
-	Body          string
-	BodyHTML      string
-	SentAt        time.Time
-	Recipients    []string
+	OriginDomain string
+	ThreadFedID  string
+	InReplyTo    string
+	Subject      string
+	MessageFedID string
+	SenderEmail  string
+	SenderName   string
+	Body         string
+	BodyHTML     string
+	SentAt       time.Time
+	Recipients   []string
+	// Members is everyone on the thread, on every Domain (RFC 5.3).
+	Members       []string
 	Attachments   []InboundAttachment
 	DestinationID int64 // customer that owns the receiving Domain, 0 if unknown
 }

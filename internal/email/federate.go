@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
 	"github.com/mevdschee/webmail-server/internal/federation"
 	"github.com/mevdschee/webmail-server/internal/mdconv"
@@ -90,10 +89,10 @@ func (s *Service) federate(ctx context.Context, tx *sql.Tx, gThreadID, gMessageI
 			Body:         body,
 			BodyHTML:     bodyHTML,
 			SentAt:       s.db.Now(),
-			// The full subscriber list, not just this Domain's share: the peer
-			// needs the whole set to reproduce the thread's membership, and
-			// delivers only to the addresses it is authoritative for.
-			Recipients:  recipientsFor(domain, addresses, subscribers),
+			// Recipients are only this Domain's share (RFC 5.3). Members are
+			// everyone, so a reply written there reaches every Domain.
+			Recipients:  addresses,
+			Members:     subscribers,
 			Attachments: outAttachments,
 			RelatedID:   gMessageID,
 		}); err != nil {
@@ -101,26 +100,6 @@ func (s *Service) federate(ctx context.Context, tx *sql.Tx, gThreadID, gMessageI
 		}
 	}
 	return nil
-}
-
-// recipientsFor returns the addresses the envelope names. The destination's own
-// subscribers come first so that a peer reading only what it can act on finds
-// them immediately.
-func recipientsFor(domain string, atDomain, allSubscribers []string) []string {
-	recipients := make([]string, 0, len(allSubscribers))
-	recipients = append(recipients, atDomain...)
-	for _, address := range allSubscribers {
-		if !strings.EqualFold(federation.DomainOf(address), domain) {
-			recipients = append(recipients, address)
-		}
-	}
-	if len(recipients) > 100 {
-		// RFC 5.3 caps the list. Truncating past the destination's own
-		// recipients keeps delivery working and only loses membership the peer
-		// could not act on anyway.
-		recipients = recipients[:100]
-	}
-	return recipients
 }
 
 // federationID reads a row's federated identifier, minting one if it has none.

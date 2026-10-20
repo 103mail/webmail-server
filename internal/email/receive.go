@@ -89,8 +89,11 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 		// sender, so that a reply from here reaches everyone on the thread,
 		// including the subscribers who live on other Domains. The sender is
 		// normally also in the recipient list.
-		if err := s.subscribeAll(ctx, tx, gThreadID,
-			append([]string{in.SenderEmail}, in.Recipients...)); err != nil {
+		members := in.Members
+		if len(members) == 0 {
+			members = append([]string{in.SenderEmail}, in.Recipients...)
+		}
+		if err := s.subscribeAll(ctx, tx, gThreadID, members); err != nil {
 			return err
 		}
 

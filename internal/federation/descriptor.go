@@ -40,6 +40,17 @@ func Host(domain string) string { return "webmail." + domain }
 // BaseURL returns the root every endpoint of a Domain hangs off.
 func BaseURL(domain string) string { return "https://" + Host(domain) }
 
+// DomainFromHost turns a Federation hostname back into the DNS domain it
+// serves. Every endpoint lives at webmail.{domain} and nowhere else, so
+// anything not carrying that label is not a Domain of ours (RFC 1.3).
+func DomainFromHost(host string) string {
+	if i := strings.LastIndex(host, ":"); i > 0 && !strings.Contains(host[i:], "]") {
+		host = host[:i]
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return strings.TrimPrefix(host, "webmail.")
+}
+
 // Validate applies the rejection rules in RFC 4.2. fetchedFrom is the DNS
 // domain the descriptor was fetched for; a descriptor claiming to speak for
 // another domain is refused, which is what stops one peer answering for
