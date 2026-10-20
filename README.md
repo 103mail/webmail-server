@@ -1,8 +1,8 @@
 # webmail-server
 
 Go backend for the webmail platform. It serves the JSON API defined by the
-OpenAPI specification in `../webmail/web/openapi/v1/` and replaces the PHP
-monolith at `../webmail`. It runs on PostgreSQL in production and on SQLite in
+OpenAPI specification in `../webmail-legacy/web/openapi/v1/` and replaces the PHP
+monolith at `../webmail-legacy`. It runs on PostgreSQL in production and on SQLite in
 every test environment (ADR 19), while the PHP backend runs on MySQL, so the
 cutover moves the data as well. See [CLAUDE.md](CLAUDE.md) for the conventions
 and [docs/adr/](docs/adr/) for the decisions behind them.

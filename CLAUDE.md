@@ -1,24 +1,30 @@
 # webmail-server
 
 Go backend for the webmail platform. It replaces the server side of the PHP
-monolith at `../webmail`. This repo is greenfield, so everything below describes
-the target design rather than existing code.
+monolith at `../webmail-legacy` and serves the API the client runs on. It also
+implements the Basic tier of the federation RFC (ADR 17) and advertises
+`registrar: false`; the Registrar tier is not built yet. 103mail.com production
+still runs on PHP until the cutover.
 
 ## Related repositories
 
-- `../webmail` is the PHP monolith (MintyPHP) that currently holds both the
-  frontend and the backend. It is the reference for behaviour, schema and API
+- `../webmail-legacy` is the PHP monolith (MintyPHP) that currently holds both
+  the frontend and the backend and runs 103mail.com production. It is the reference for behaviour, schema and API
   shape, and it is being superseded. Read it, do not extend it.
 - `../webmail-client` is the TypeScript SPA (React 19, MUI 9, Vite) and the only
-  frontend. It still runs on mock fixtures in `src/data/`; this repo provides the
-  API that replaces them.
+  frontend. It runs on this API, configured per Domain through `/config.json`,
+  with chat over WebSocket.
 - `../webmail-federation` holds the protocol design for exchanging messages
   between independently operated domains. `project_rfc.md` is normative for
-  anything cross-domain, `project_design.md` covers the migration, and
-  `project_overview.md` is the summary.
-- `../dbml-tools` is the CLI used to keep the schema in DBML and to generate SQL
+  anything cross-domain, `project_design.md` covers the migration,
+  `project_overview.md` is the summary and `project_plan.md` the order of work
+  and current status.
+- `../webmail-e2e` holds the end-to-end stories, run with godog against the
+  Domains in `deploy/` through the public API only. A milestone is done when its
+  stories are green. The read-only controls it uses are in ADR 20.
+- `../../dbml-tools` is the CLI used to keep the schema in DBML and to generate SQL
   and migrations from it.
-- `../ws2api` is the WebSocket proxy that terminates chat connections and turns
+- `../../ws2api` is the WebSocket proxy that terminates chat connections and turns
   them into plain HTTP against this backend, keeping the API server stateless.
   See ADR 13.
 
@@ -26,6 +32,9 @@ the target design rather than existing code.
 
 - HTTP JSON API for auth, mail, calendar, chat and attachments, replacing
   `pages/api/v1/` and `lib/Public/` in the PHP repo.
+- `deploy/` runs four independent Domains locally (103mail.com, example.com,
+  mail.acme.test and its parent acme.test) that federate with each other; see
+  `deploy/README.md`.
 - Federation endpoints from the RFC: `GET /.well-known/webmail-federation` and
   `POST /api/v1/federation/inbound`.
 - Background workers for scheduled work: digests, reminders, retention purges and
@@ -40,7 +49,7 @@ the target design rather than existing code.
 
 ## Principles
 
-Carried over from `../webmail/.specify/memory/constitution.md` (v1.0.3) and
+Carried over from `../webmail-legacy/.specify/memory/constitution.md` (v1.0.3) and
 adapted to Go. See `docs/adr/` for the reasoning behind each.
 
 1. **Content privacy and non-forwarding.** Message content never leaves the
@@ -104,7 +113,7 @@ adapted to Go. See `docs/adr/` for the reasoning behind each.
   and no `LIMIT` on `UPDATE` or `DELETE`. Engine differences live only in
   `internal/store`, full-text search included (`db.Match`).
 - Store and compare email addresses lowercase (`store.Address`).
-- Keep the schema as DBML and generate SQL and migrations with `../dbml-tools`
+- Keep the schema as DBML and generate SQL and migrations with `../../dbml-tools`
   (`dbml-tools check`, `tosql`, `migrate`); `schema/generate.sh` renders both
   engines' DDL.
 - Times are stored in UTC. IANA timezone identifiers are stored alongside for
@@ -115,7 +124,7 @@ adapted to Go. See `docs/adr/` for the reasoning behind each.
 - `go test ./...` must pass. Mirror the PHP layout: unit tests for logic,
   integration tests against a real database for projection rules
   (`internal/store/storetest`, SQLite by default, PostgreSQL with
-  `WEBMAIL_TEST_POSTGRES_DSN`), end-to-end tests driving the SPA.
+  `WEBMAIL_TEST_POSTGRES_DSN`), end-to-end stories in `../webmail-e2e`.
 - External services (mail providers, federation peers) must be mockable so tests
   stay deterministic.
 - Cover every exported function of a package before merging it.
