@@ -339,17 +339,48 @@ func TestUnknownLocalRecipientsAreRefused(t *testing.T) {
 // delivers nothing and creates nothing, so the inbound endpoint answers 404.
 func TestIncomingMailIsRefusedForUnknownAddresses(t *testing.T) {
 	f := newFixture(t)
-	delivered, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+	delivered, refused, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
 		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
 		Subject: "Hi", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
 		SenderEmail: "pete@peer.test", SenderName: "Pete", Body: "Anyone?", SentAt: f.now,
 		Recipients: []string{"nobody@example.test"},
 	})
-	if err != nil || delivered != 0 {
-		t.Fatalf("DeliverInbound = %d, %v, want nothing delivered", delivered, err)
+	if err != nil || delivered != 0 || !slices.Equal(refused, []string{"nobody@example.test"}) {
+		t.Fatalf("DeliverInbound = %d, %v, %v, want nothing delivered and Nobody refused", delivered, refused, err)
 	}
 	if n := f.count(`SELECT COUNT(*) FROM "user"`); n != 0 {
 		t.Errorf("%d accounts were created", n)
+	}
+}
+
+// An envelope for one known and one unknown address is delivered to the known
+// one, and the unknown one is reported so the sender's Domain can bounce it
+// (RFC 6.3). A replay reports the same, and delivers nothing twice.
+func TestPartlyUnknownEnvelopeReportsTheUnknown(t *testing.T) {
+	f := newFixture(t)
+	bob, _, bobInbox := f.account("bob@example.test", "Bob")
+	in := federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+		Subject: "Hi", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
+		SenderEmail: "pete@peer.test", SenderName: "Pete", Body: "Anyone?", SentAt: f.now,
+		Recipients: []string{"bob@example.test", "nobody@example.test"},
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		delivered, refused, err := f.svc.DeliverInbound(f.ctx, in)
+		if err != nil || delivered != 1 || !slices.Equal(refused, []string{"nobody@example.test"}) {
+			t.Fatalf("attempt %d: DeliverInbound = %d, %v, %v", attempt, delivered, refused, err)
+		}
+		undelivered, err := f.svc.Undelivered(f.ctx, in)
+		if err != nil || !slices.Equal(undelivered, []string{"nobody@example.test"}) {
+			t.Fatalf("attempt %d: Undelivered = %v, %v", attempt, undelivered, err)
+		}
+	}
+	threads, err := f.svc.ListThreads(f.ctx, bob, bobInbox, "")
+	if err != nil || len(threads) != 1 {
+		t.Fatalf("Bob has %d threads, %v", len(threads), err)
+	}
+	if messages, _ := f.svc.ListMessages(f.ctx, bob, threads[0].ThreadID, ""); len(messages) != 1 {
+		t.Errorf("Bob has %d messages after a replay, want 1", len(messages))
 	}
 }
 
@@ -498,7 +529,7 @@ func TestInbound(t *testing.T) {
 		t.Errorf("%d subscriptions, want the sender and Bob once each", n)
 	}
 
-	delivered, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+	delivered, _, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
 		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
 		Subject: "Federated", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
 		SenderEmail: "Pete@peer.test", SenderName: "Pete", Body: "From a peer",

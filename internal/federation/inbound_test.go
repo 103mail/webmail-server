@@ -223,3 +223,40 @@ func TestPermanentStatusesAreNotRetried(t *testing.T) {
 		}
 	}
 }
+
+func TestRefusedRecipientsAreReadFromTheAcceptance(t *testing.T) {
+	refused := refusalsIn([]byte(`{"envelope_id":"e","status":"accepted",` +
+		`"refused_recipients":[{"address":"Nobody@Peer.test","error":"unknown_recipient"}]}`))
+	if len(refused) != 1 || refused[0].Address != "nobody@peer.test" || refused[0].Error != ErrUnknownRecipient {
+		t.Errorf("refusalsIn = %+v", refused)
+	}
+	// A 0.2 peer sends no list, and a body that is not JSON is no reason to
+	// doubt a 202.
+	for _, body := range []string{`{"envelope_id":"e","status":"accepted"}`, ``, `not json`} {
+		if refused := refusalsIn([]byte(body)); len(refused) != 0 {
+			t.Errorf("refusalsIn(%q) = %+v, want none", body, refused)
+		}
+	}
+}
+
+func TestOnlyRefusalsForAddressesSentAreBounced(t *testing.T) {
+	envelope := Envelope{Recipients: []string{"bob@peer.test", "nobody@peer.test", "ghost@peer.test"}}
+	got := bounceable(envelope, []Refusal{
+		{Address: "nobody@peer.test", Error: ErrUnknownRecipient},
+		{Address: "ghost@peer.test", Error: "something_new"},
+		{Address: "carol@elsewhere.test", Error: ErrUnknownRecipient}, // never sent
+		{Address: "nobody@peer.test", Error: ErrUnknownRecipient},     // listed twice
+	})
+	want := map[string][]string{
+		ErrUnknownRecipient: {"nobody@peer.test"},
+		"something_new":     {"ghost@peer.test"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("bounceable = %v, want %v", got, want)
+	}
+	for code, addresses := range want {
+		if strings.Join(got[code], ",") != strings.Join(addresses, ",") {
+			t.Errorf("bounceable[%s] = %v, want %v", code, got[code], addresses)
+		}
+	}
+}

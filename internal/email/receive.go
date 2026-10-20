@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/mevdschee/webmail-server/internal/federation"
@@ -20,31 +21,24 @@ import (
 // that the canonical rows carry the identifiers the origin chose, so the two
 // Domains agree on what this thread is (ADR 17).
 //
-// It returns the number of recipients actually delivered to. Zero means none of
-// them have an account here, which the caller answers 404 (RFC 6.5). Incoming
-// mail never creates an account.
-func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (int, error) {
-	// Only the addresses this Server is authoritative for. The envelope names
-	// the whole subscriber set so the thread's membership is complete, but a
-	// Domain delivers to its own recipients and no one else's.
+// It returns how many recipients were delivered to, and the local recipients
+// that were not because they have no account here. None delivered is answered
+// 404 and some refused are listed in the 202 (RFC 6.3, 6.5). Incoming mail
+// never creates an account. A repeat of the same message writes nothing and
+// returns the same answer.
+func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (int, []string, error) {
 	in.SenderEmail = store.Address(in.SenderEmail)
 	recipients := make([]string, len(in.Recipients))
 	for i, address := range in.Recipients {
 		recipients[i] = store.Address(address)
 	}
 	in.Recipients = recipients
-
-	var mine []string
-	for _, address := range in.Recipients {
-		if s.isLocal(address) {
-			mine = append(mine, address)
-		}
-	}
+	mine := s.localRecipients(in)
 	if len(mine) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 
-	var delivered int
+	var refused []string
 	sender := identity{Email: in.SenderEmail, Name: in.SenderName}
 
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
@@ -62,8 +56,8 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 			return fmt.Errorf("look up federated message: %w", err)
 		}
 		if existing != 0 {
-			delivered = len(mine)
-			return nil
+			refused, err = s.undelivered(ctx, tx, in.MessageFedID, mine)
+			return err
 		}
 
 		body := in.Body
@@ -101,20 +95,59 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 		}
 
 		for _, address := range mine {
-			ok, err := s.projectInbound(ctx, tx, gThreadID, gMessageID, gAttachmentIDs, address, sender)
-			if err != nil {
+			if _, err := s.projectInbound(ctx, tx, gThreadID, gMessageID, gAttachmentIDs, address, sender); err != nil {
 				return err
 			}
-			if ok {
-				delivered++
-			}
 		}
-		return nil
+		refused, err = s.undelivered(ctx, tx, in.MessageFedID, mine)
+		return err
 	})
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return delivered, nil
+	return len(mine) - len(refused), refused, nil
+}
+
+// Undelivered lists the local recipients of a federated message that have no
+// copy of it. It only reads, so a replayed envelope is answered with the list
+// its first delivery produced (RFC 5.4).
+func (s *Service) Undelivered(ctx context.Context, in federation.Inbound) ([]string, error) {
+	return s.undelivered(ctx, s.db, in.MessageFedID, s.localRecipients(in))
+}
+
+// localRecipients are the envelope's recipients on a Domain this Server is
+// authoritative for, lowercase. The envelope names the whole subscriber set
+// so the thread's membership is complete, but a Domain delivers to its own
+// recipients and no one else's.
+func (s *Service) localRecipients(in federation.Inbound) []string {
+	var mine []string
+	for _, address := range in.Recipients {
+		if address = store.Address(address); s.isLocal(address) && !slices.Contains(mine, address) {
+			mine = append(mine, address)
+		}
+	}
+	return mine
+}
+
+// undelivered returns the addresses with no copy of a federated message.
+func (s *Service) undelivered(ctx context.Context, q store.Queryer, messageFedID string,
+	addresses []string) ([]string, error) {
+	var out []string
+	for _, address := range addresses {
+		n, err := store.SelectInt(ctx, q,
+			`SELECT COUNT(*) FROM "message" `+
+				`JOIN "g_message" ON "g_message"."id" = "message"."g_message_id" `+
+				`JOIN "alias" ON "alias"."customer_id" = "message"."customer_id" `+
+				`WHERE "g_message"."federation_id" = ? AND "alias"."email" = ?`,
+			messageFedID, address)
+		if err != nil {
+			return nil, fmt.Errorf("look up delivery to %s: %w", address, err)
+		}
+		if n == 0 {
+			out = append(out, address)
+		}
+	}
+	return out, nil
 }
 
 // subscribeAll adds addresses to a thread's subscriber set, skipping the ones

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -217,12 +218,15 @@ func (s *Service) claim(ctx context.Context, peer string, limit int) ([]outboxRo
 
 // attempt makes one delivery attempt and records what happened.
 func (s *Service) attempt(ctx context.Context, row outboxRow) {
-	status, retryAfter, err := s.post(ctx, row)
+	status, retryAfter, refused, err := s.post(ctx, row)
 
 	switch {
 	case err == nil && status == http.StatusAccepted:
 		s.finish(ctx, row, "delivered", status, "")
 		s.log.Info("envelope delivered", "peer", row.PeerDomain, "envelope", row.EnvelopeID)
+		if len(refused) > 0 {
+			s.bounceRefused(ctx, row, refused)
+		}
 
 	case isPermanent(status):
 		detail := fmt.Sprintf("peer answered %d", status)
@@ -249,29 +253,29 @@ func (s *Service) attempt(ctx context.Context, row outboxRow) {
 // time because the signing input covers the Date and Nonce headers, which have
 // to be fresh on every attempt: a signature made three days ago would be
 // rejected as a stale request. The body bytes are the stored ones, untouched.
-func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, error) {
+func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, []Refusal, error) {
 	origin, ok := s.local[row.OriginDomain]
 	if !ok {
-		return 0, 0, fmt.Errorf("origin domain %s is no longer hosted here", row.OriginDomain)
+		return 0, 0, nil, fmt.Errorf("origin domain %s is no longer hosted here", row.OriginDomain)
 	}
 
 	peer, err := s.Peer(ctx, row.PeerDomain, false)
 	if err != nil {
-		return 0, 0, fmt.Errorf("discover %s: %w", row.PeerDomain, err)
+		return 0, 0, nil, fmt.Errorf("discover %s: %w", row.PeerDomain, err)
 	}
 	if !peer.Speaks(Version) {
 		// Permanent: the peer has told us it does not speak our version, and
 		// no amount of retrying changes that.
-		return http.StatusBadRequest, 0, fmt.Errorf("peer %s does not speak %s", row.PeerDomain, Version)
+		return http.StatusBadRequest, 0, nil, fmt.Errorf("peer %s does not speak %s", row.PeerDomain, Version)
 	}
 	if int64(len(row.Body)) > peer.EnvelopeCap() {
-		return http.StatusRequestEntityTooLarge, 0, fmt.Errorf(
+		return http.StatusRequestEntityTooLarge, 0, nil, fmt.Errorf(
 			"envelope is %d bytes, peer %s accepts %d", len(row.Body), row.PeerDomain, peer.EnvelopeCap())
 	}
 
 	nonce, err := NewNonce()
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 	date := HTTPDate(time.Now())
 	signature := Sign(origin.key, Version, origin.Domain, nonce, date, row.Body)
@@ -279,7 +283,7 @@ func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		BaseURL(row.PeerDomain)+InboundPath, bytes.NewReader(row.Body))
 	if err != nil {
-		return 0, 0, fmt.Errorf("build inbound request: %w", err)
+		return 0, 0, nil, fmt.Errorf("build inbound request: %w", err)
 	}
 	req.ContentLength = int64(len(row.Body))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
@@ -292,18 +296,18 @@ func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, 
 	resp, err := s.deliveryClient.Do(req)
 	if err != nil {
 		// Connection refused, TLS failure, timeout: all transient (RFC 6.4).
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 	defer resp.Body.Close()
-	// The body is small and only used for logging, but it still has to be read
-	// for the connection to be reusable.
-	detail, _ := readCapped(resp.Body, 4096)
+	// The body is read in full for the connection to be reusable. An error
+	// body is only logged; a 202 may list up to 100 refused recipients.
+	detail, _ := readCapped(resp.Body, 64<<10)
 
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return http.StatusBadRequest, 0, fmt.Errorf("peer %s redirected inbound, which is not honoured", row.PeerDomain)
+		return http.StatusBadRequest, 0, nil, fmt.Errorf("peer %s redirected inbound, which is not honoured", row.PeerDomain)
 	}
 	if resp.StatusCode == http.StatusAccepted {
-		return resp.StatusCode, 0, nil
+		return resp.StatusCode, 0, refusalsIn([]byte(detail)), nil
 	}
 	// A signature the peer refuses may just mean it holds a stale key for us.
 	// Refreshing our own descriptor is not possible from here, but forcing a
@@ -313,8 +317,67 @@ func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, 
 			s.log.Warn("forced peer refresh failed", "peer", row.PeerDomain, "error", refreshErr)
 		}
 	}
-	return resp.StatusCode, retryAfterOf(resp), fmt.Errorf("peer %s answered %d: %s",
+	if len(detail) > 4096 {
+		detail = detail[:4096]
+	}
+	return resp.StatusCode, retryAfterOf(resp), nil, fmt.Errorf("peer %s answered %d: %s",
 		row.PeerDomain, resp.StatusCode, strings.TrimSpace(detail))
+}
+
+// refusalsIn reads the refused recipients out of a 202 body. A body without
+// the list, from a 0.2 peer, or one that is not JSON, refuses nobody: the 202
+// itself is what counts.
+func refusalsIn(body []byte) []Refusal {
+	var a Accepted
+	if err := json.Unmarshal(body, &a); err != nil {
+		return nil
+	}
+	for i := range a.Refused {
+		a.Refused[i].Address = strings.ToLower(strings.TrimSpace(a.Refused[i].Address))
+	}
+	return a.Refused
+}
+
+// bounceable groups refused addresses by error code, keeping only addresses
+// the envelope was actually sent to, so a peer cannot cause bounces for
+// addresses it never received (RFC 6.5).
+func bounceable(envelope Envelope, refused []Refusal) map[string][]string {
+	out := map[string][]string{}
+	for _, r := range refused {
+		if !slices.ContainsFunc(envelope.Recipients, func(a string) bool { return strings.EqualFold(a, r.Address) }) ||
+			slices.Contains(out[r.Error], r.Address) {
+			continue
+		}
+		out[r.Error] = append(out[r.Error], r.Address)
+	}
+	return out
+}
+
+// bounceRefused tells the sender about the recipients a peer accepted the
+// envelope without, one bounce per reason (RFC 6.5).
+func (s *Service) bounceRefused(ctx context.Context, row outboxRow, refused []Refusal) {
+	if s.deliverer == nil {
+		return
+	}
+	var envelope Envelope
+	if err := json.Unmarshal(row.Body, &envelope); err != nil {
+		s.log.Error("could not read a delivered envelope to bounce its refusals", "id", row.ID, "error", err)
+		return
+	}
+	for code, addresses := range bounceable(envelope, refused) {
+		if err := s.deliverer.Bounce(ctx, BounceNotice{
+			OriginDomain: row.OriginDomain,
+			SenderEmail:  envelope.Message.SenderEmail,
+			Subject:      envelope.Thread.Subject,
+			Recipients:   addresses,
+			PeerDomain:   row.PeerDomain,
+			EnvelopeID:   row.EnvelopeID,
+			HTTPStatus:   http.StatusAccepted,
+			ErrorCode:    code,
+		}); err != nil {
+			s.log.Error("could not write a bounce", "envelope", row.EnvelopeID, "error", err)
+		}
+	}
 }
 
 // isPermanent classifies a response. Everything the RFC lists as permanent is

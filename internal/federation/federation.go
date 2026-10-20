@@ -159,9 +159,14 @@ func checkDomainName(name string) error {
 type Deliverer interface {
 	// DeliverInbound resolves each recipient to a local account and writes the
 	// canonical rows plus one projection per recipient. It returns how many
-	// recipients it actually delivered to; zero means none were known and none
-	// were onboarded, which the caller answers with 404 (RFC 6.5).
-	DeliverInbound(ctx context.Context, in Inbound) (int, error)
+	// recipients it delivered to, and the local recipients it did not deliver
+	// to. None delivered is answered 404, some refused is listed in the 202
+	// (RFC 6.3, 6.5).
+	DeliverInbound(ctx context.Context, in Inbound) (int, []string, error)
+	// Undelivered lists the local recipients of an already accepted envelope
+	// that have no copy of its message. It only reads, which is what lets a
+	// replay be answered with the original list (RFC 5.4).
+	Undelivered(ctx context.Context, in Inbound) ([]string, error)
 	// Bounce writes a delivery failure into the original sender's own mailbox.
 	// It is local and never leaves this Server (RFC 6.5).
 	Bounce(ctx context.Context, b BounceNotice) error

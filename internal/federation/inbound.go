@@ -73,6 +73,28 @@ func RequestFrom(r *http.Request, maxBytes int64) (*Request, *Rejection) {
 type Accepted struct {
 	EnvelopeID string `json:"envelope_id"`
 	Status     string `json:"status"`
+	// Refused lists the recipients that were not delivered to, when some
+	// were (RFC 6.3).
+	Refused []Refusal `json:"refused_recipients,omitempty"`
+}
+
+// Refusal is one recipient a Destination did not deliver to, and why.
+type Refusal struct {
+	Address string `json:"address"`
+	Error   string `json:"error"`
+}
+
+// ErrUnknownRecipient refuses an address on the Destination's own domain that
+// has no account there (RFC 6.3).
+const ErrUnknownRecipient = "unknown_recipient"
+
+// accepted builds the 202 for an envelope, listing the refused addresses.
+func accepted(envelopeID string, refused []string) *Accepted {
+	a := &Accepted{EnvelopeID: envelopeID, Status: "accepted"}
+	for _, address := range refused {
+		a.Refused = append(a.Refused, Refusal{Address: address, Error: ErrUnknownRecipient})
+	}
+	return a
 }
 
 // Receive authenticates, validates and delivers an inbound envelope.
@@ -137,16 +159,6 @@ func (s *Service) Receive(ctx context.Context, req *Request) (*Accepted, *Reject
 		return nil, reject(401, ErrSenderMismatch, "sender_email is not on the sending Domain")
 	}
 
-	// Dedup last, so a replay of an envelope we accepted replays the same 202
-	// without re-running any of the work above having any effect (RFC 5.4).
-	seen, err := s.alreadyAccepted(ctx, req.Sender, envelope.EnvelopeID)
-	if err != nil {
-		return nil, reject(500, ErrServerError, err.Error())
-	}
-	if seen {
-		return &Accepted{EnvelopeID: envelope.EnvelopeID, Status: "accepted"}, nil
-	}
-
 	inbound, r := s.toInbound(&envelope)
 	if r != nil {
 		return nil, r
@@ -154,7 +166,24 @@ func (s *Service) Receive(ctx context.Context, req *Request) (*Accepted, *Reject
 	if s.deliverer == nil {
 		return nil, reject(500, ErrServerError, "no mail domain is wired to receive")
 	}
-	delivered, err := s.deliverer.DeliverInbound(ctx, *inbound)
+
+	// Dedup last, so a replay of an envelope we accepted replays the same 202
+	// without re-running any of the work above having any effect (RFC 5.4).
+	// The refused list is read again rather than stored: it is the recipients
+	// with no copy of the message, and copies are only written the first time.
+	seen, err := s.alreadyAccepted(ctx, req.Sender, envelope.EnvelopeID)
+	if err != nil {
+		return nil, reject(500, ErrServerError, err.Error())
+	}
+	if seen {
+		refused, err := s.deliverer.Undelivered(ctx, *inbound)
+		if err != nil {
+			return nil, reject(500, ErrServerError, err.Error())
+		}
+		return accepted(envelope.EnvelopeID, refused), nil
+	}
+
+	delivered, refused, err := s.deliverer.DeliverInbound(ctx, *inbound)
 	if err != nil {
 		// A local failure is transient from the peer's point of view: it should
 		// retry, and the dedup row is deliberately not written.
@@ -173,8 +202,8 @@ func (s *Service) Receive(ctx context.Context, req *Request) (*Accepted, *Reject
 			"sender", req.Sender, "envelope", envelope.EnvelopeID, "error", err)
 	}
 	s.log.Info("envelope accepted", "sender", req.Sender,
-		"envelope", envelope.EnvelopeID, "recipients", delivered)
-	return &Accepted{EnvelopeID: envelope.EnvelopeID, Status: "accepted"}, nil
+		"envelope", envelope.EnvelopeID, "recipients", delivered, "refused", len(refused))
+	return accepted(envelope.EnvelopeID, refused), nil
 }
 
 // checkDate enforces the clock-skew window in both directions. A request from
