@@ -27,3 +27,4 @@ rewrite.
 | [16](0016-wiring-email-in-and-out.md) | Wiring email in and out | |
 | [17](0017-implementing-webmail-federation.md) | Implementing Webmail-Federation | webmail-federation |
 | [18](0018-the-ws2api-chat-bridge.md) | The ws2api chat bridge | ws2api |
+| [19](0019-postgresql-in-production-sqlite-under-test.md) | PostgreSQL in production, SQLite under test (proposed) | |
