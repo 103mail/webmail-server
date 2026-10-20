@@ -40,8 +40,6 @@ either backend during migration.
 - Chat can use WebSocket connections and federation can use worker goroutines
   without fighting the request model.
 - Session-cookie auth backed by server-rendered login pages has to be replaced by
-  token auth the SPA can carry. See ADR 6 for the token model.
+  bearer-token auth the SPA can carry.
 - Two backends exist during migration. Keeping the resource shape stable is what
   makes running them side by side practical, so deviating from it needs a reason.
-- The schema is shared, so the Go backend must respect projection invariants
-  exactly as the PHP code does or the two will corrupt each other's view.

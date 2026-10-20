@@ -24,8 +24,9 @@ file, using the format of this document: context, decision, consequences.
 ADRs derived from the PHP repo carry a `Source:` line naming the document they
 came from, so the provenance of an inherited constraint stays visible.
 
-ADRs are append-only. A decision that changes gets a new ADR that supersedes the
-old one; the old one is marked superseded and kept.
+ADRs describe the architecture as it stands. When a decision changes, the ADR
+that holds it is edited and the superseded text removed, so no ADR disputes an
+earlier one. Git history keeps what was there before.
 
 ## Consequences
 

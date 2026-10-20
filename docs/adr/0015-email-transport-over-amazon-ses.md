@@ -91,15 +91,14 @@ from here.
 
 ## Consequences
 
-- Nothing in this repo delivers outbound mail any more. The topic needs a
+- Nothing in this repo delivers outbound mail. The topic needs a
   subscriber that actually sends, and until one exists notification email does
   not arrive. That subscriber is a deployment component this repo does not
   contain.
 - Decoupling means outbound failures are no longer visible here. A publish that
   succeeds says the topic accepted the notification, not that anyone received
   it; `sent_email.status` records the publish, not the delivery. Bounces and
-  complaints are the subscriber's to surface, and there is no SES configuration
-  set here to publish them, because we no longer send through SES.
+  complaints are the subscriber's to surface.
 - Receiving depends on three AWS services at once: a receipt rule, a bucket and
   a topic. That is the price of not operating SMTP, and it is paid in
   deployment steps rather than in code.

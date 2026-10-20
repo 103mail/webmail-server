@@ -19,7 +19,7 @@ missed without duplicates.
 
 ## Decision
 
-Chat runs over WebSocket connections held by the Go backend. Ordering is
+Chat runs over WebSocket connections (terminated as in ADR 13). Ordering is
 established by server-assigned monotonic message ids, not client timestamps.
 
 Delivery state is tracked per recipient in `message_status` with forward-only
@@ -39,10 +39,6 @@ messages sent before `left_at` and receives nothing after it.
 
 ## Consequences
 
-- Holding connections makes the API server stateful in a way the mail and
-  calendar endpoints are not, so horizontal scaling needs a way to route or fan
-  out between nodes. ADR 13 resolves this by terminating the connections in
-  ws2api and keeping the API server stateless.
 - Typing indicators and presence are high-frequency and low-value. They must not
   be written to the audit log or they will dominate it.
 - The 2 second delivery target applies to the WebSocket path only. Federated

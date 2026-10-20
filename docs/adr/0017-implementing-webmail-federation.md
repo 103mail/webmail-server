@@ -7,25 +7,19 @@ Source: `../webmail-federation/project_rfc.md` (v0.2, normative),
 
 ## Context
 
-ADR 11 decided that Domains exchange messages over HTTPS rather than SMTP. It
-did not say how, and nothing implemented it: `EmailClient`'s fan-out treated
-every recipient as local, so a message to `bob@example.com` created a local
-account with a `103mail.com` alias rather than reaching the Domain that address
-belongs to. That shortcut is the single-domain assumption showing through, and
-it is wrong in a way that silently loses mail: the sender sees a Sent copy and
-believes it arrived.
-
-The RFC specifies the wire. This ADR records how it is built here, and the
-places where building it forced a choice the RFC leaves open or where the design
-document and the RFC disagree.
+ADR 11 decided that Domains exchange messages over HTTPS. The RFC specifies the
+wire; this ADR records how it is built here and the choices the RFC leaves open.
+A fan-out that treats every recipient as local silently loses mail: a message to
+`bob@example.com` creates a local account with a `103mail.com` alias, and the
+sender sees a Sent copy and believes it arrived.
 
 ## Decision
 
 Implement the **Basic Webmail-Federation Domain** tier: peer discovery (RFC 4),
 envelope format (5), inbound transfer (6), inline attachments (7), transport,
 auth scope, replay and rotation (9.1–9.5, 9.8), and versioning (10). The
-Registrar extension (RFC 8) and everything that depends on it — shadow
-mailboxes, real-email addressing, multi-registrar coordination — is out of
+Registrar extension (RFC 8) and everything that depends on it (shadow
+mailboxes, real-email addressing, multi-registrar coordination) is out of
 scope and this Domain advertises `"registrar": false`.
 
 ### Shape
@@ -63,7 +57,7 @@ without an HTTP server, and it is the same discipline the SES webhook follows.
 
 ### Fan-out splits, and the canonical rows do not
 
-`deliver` now sorts each subscriber into local or remote. A local subscriber
+`deliver` sorts each subscriber into local or remote. A local subscriber
 gets the projection row it always got. A remote subscriber gets an envelope
 queued for their Domain, and **no local account**: creating one would hand them
 an address here that is not theirs. They become a `contact` row so autocomplete
@@ -96,7 +90,7 @@ a user-visible operation can only fail for a local reason, never because a peer
 is down.
 
 Delivery is at-least-once with receiver-side dedup on
-`(sender, envelope_id)`. Rows are claimed with `FOR UPDATE SKIP LOCKED` before
+`(sender, envelope_id)`. Rows are claimed with a lease (ADR 19) before
 any network work, so several workers are safe. The claim query partitions by
 `peer_domain`, so one dead Domain delays only the envelopes addressed to it.
 
@@ -106,6 +100,12 @@ every queued sender at the same instant. On permanent failure or an exhausted
 budget the sender gets a **local bounce** in their own mailbox. Without it a
 permanent failure would be silent and the sender would go on believing the
 message arrived, because their Sent copy exists.
+
+The body bytes of an outbox row are stored exactly as serialized and never
+re-serialized, because JSON key order is not stable and the signature covers the
+body. The signature is computed per attempt over those bytes with a fresh `Date`
+and nonce, because RFC 6.2 signs both and rejects a `Date` more than five
+minutes old.
 
 ### Trust
 
@@ -132,15 +132,12 @@ and the signing key cannot drift apart.
 - Mail to a federated Domain reaches it. Replies correlate back onto the same
   thread on both sides.
 - An unknown recipient is only onboarded on the Domain their address belongs
-  to, which is the one place it is correct. The `{7digit}@103mail.com` shortcut
-  is gone for federated domains.
-- The `domain` table stops being a singleton read through
-  "the row where `customer_id` is null" and becomes both the local-Domain list
-  and the peer cache, keyed by name.
+  to.
+- The `domain` table is both the local-Domain list and the peer cache, keyed by
+  name.
 - There is a second binary. Delivery to a peer has a 72-hour budget and cannot
   live in a request.
-- With no `WEBMAIL_FEDERATION_CONFIG` the server behaves exactly as before:
-  every address is local. The disabled service answers `IsLocal` true for
+- With no `WEBMAIL_FEDERATION_CONFIG` every address is local. The disabled service answers `IsLocal` true for
   everything rather than being nil, so no caller carries a nil check.
 
 ### Choices the specification left open
@@ -162,26 +159,8 @@ a domain containing a dot. Anything stricter starts rejecting addresses peers
 legitimately hold, and the domain part is the only piece this protocol routes
 on.
 
-### Where the design document and the RFC disagree
-
-The design says an outbox row's headers and body are reused verbatim on retry
-and "never re-signed". That cannot work: RFC 6.2 puts the `Date` and
-`X-Federation-Nonce` headers inside the signing input, and RFC 6.2 also rejects
-a `Date` more than five minutes old. A signature made at enqueue time would be
-refused as `stale_request` on every retry after the first five minutes.
-
-Resolved by keeping what the rule is actually protecting: **the body bytes are
-stored exactly as serialized and never re-serialized**, because JSON key
-ordering is not stable and the signature covers the body. The signature itself
-is computed per attempt over those stored bytes with a fresh `Date` and nonce.
-
 ### Known gaps
 
-- **`g_subscription` has no unique index on `(g_thread_id, email)`.** Several
-  call sites use `INSERT IGNORE` as though it did; it only suppresses errors,
-  not duplicate rows. The inbound path deduplicates in code instead. The index
-  is the right fix, but the production data already contains duplicates, so
-  adding it needs a cleanup that is not this change's to make.
 - **No inbound rate limiting.** RFC 9.10 makes it advisory and the response
   code (`429`) is implemented on the sending side, but nothing here counts.
 - **Key rotation is supported on the receiving side only.** A peer that rotates

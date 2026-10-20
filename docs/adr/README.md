@@ -1,7 +1,7 @@
 # Architecture decisions
 
-One decision per file, numbered, append-only. A decision that changes gets a new
-ADR that supersedes the old one. See ADR 1 for the format.
+One decision per file, numbered. A decision that changes is edited in place
+rather than disputed by a later ADR. See ADR 1 for the format.
 
 Decisions marked with a source were inherited from `../webmail` or
 `../webmail-federation` and are recorded here so the reasoning survives the
@@ -27,4 +27,4 @@ rewrite.
 | [16](0016-wiring-email-in-and-out.md) | Wiring email in and out | |
 | [17](0017-implementing-webmail-federation.md) | Implementing Webmail-Federation | webmail-federation |
 | [18](0018-the-ws2api-chat-bridge.md) | The ws2api chat bridge | ws2api |
-| [19](0019-postgresql-in-production-sqlite-under-test.md) | PostgreSQL in production, SQLite under test (proposed) | |
+| [19](0019-postgresql-in-production-sqlite-under-test.md) | PostgreSQL in production, SQLite under test | |

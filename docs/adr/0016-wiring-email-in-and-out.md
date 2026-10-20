@@ -2,14 +2,12 @@
 
 Status: accepted
 Date: 2026-08-24
-Source: this repo; supersedes the "nothing imports this package" consequence of
-[ADR 15](0015-email-transport-over-amazon-ses.md)
+Source: this repo
 
 ## Context
 
-ADR 15 built email transport and left it with no caller. Connecting it raises
-the question the transport itself deliberately does not answer: what may be
-sent, and what happens to what arrives.
+The transport of ADR 15 deliberately does not decide what may be sent, or what
+happens to what arrives.
 
 The rule from ADR 4 is that message content never leaves by email. A transport
 type cannot enforce that, because `mailer.Outbound` has an `HTML` field and a
@@ -40,10 +38,9 @@ not render HTML still receives a readable message.
 
 ### Onboarding is the first caller
 
-Fan-out already creates an account for an unknown recipient. It now also mints a
-single-use token valid for 30 days and, after the transaction commits, sends the
-`invite` template carrying who wrote, the subject, and the token. That is ADR 6
-made real.
+Fan-out creates an account for an unknown local recipient, mints a single-use
+token valid for 30 days and, after the transaction commits, sends the `invite`
+template carrying who wrote, the subject, and the token, as ADR 6 requires.
 
 The send happens after commit, never inside the transaction: a publish inside
 one would hold locks across a network round trip and could not be rolled back.
@@ -78,8 +75,7 @@ returns 403 rather than 5xx so a forged post is not retried at all.
 
 ### Idempotency needs a table
 
-`inbound_email` holds one row per provider message id, added by
-`schema/migrations/0002-inbound-email.sql`. The insert is what claims the id, so
+`inbound_email` holds one row per provider message id. The insert claims the id, so
 two concurrent redeliveries race on the primary key and exactly one wins. The
 table is additive: no existing table changes, so the PHP backend is unaffected.
 

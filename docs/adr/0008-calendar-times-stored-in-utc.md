@@ -42,6 +42,3 @@ the series intact.
 - Storing both a UTC instant and the zone means they can disagree. The UTC value
   is authoritative for ordering and reminders; the zone is authoritative for
   what the user meant.
-- The PHP repo uses `rlanvin/php-rrule`. The Go implementation needs an RRULE
-  library with matching semantics, and the two must agree while both backends
-  run.

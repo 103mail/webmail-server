@@ -5,9 +5,6 @@ Date: 2026-08-24
 Source: `../webmail-federation/project_rfc.md` (v0.2 draft),
 `project_design.md`
 
-Note: this decision comes from the federation repo, not from the PHP feature
-specs. It is recorded here because it constrains the backend directly.
-
 ## Context
 
 The PHP backend assumes one domain. `EmailClient::getDefaultDomain()` treats the

@@ -4,12 +4,9 @@ Status: accepted
 Date: 2026-08-24
 Source: this repo; tooling from `../dbml-tools`
 
-Note: this is a new decision for the Go backend, not inherited from the PHP repo.
-
 ## Context
 
-The schema is shared with the PHP backend for the duration of the migration
-(ADR 2), so both must agree on it exactly. It is also large: canonical tables,
+The schema is large: canonical tables,
 projection tables and supporting tables across mail, calendar, chat and audit,
 with invariants that only make sense when the whole shape is visible.
 
