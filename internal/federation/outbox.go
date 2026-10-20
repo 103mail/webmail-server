@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mevdschee/webmail-server/internal/store"
 )
 
 // Outbound is one envelope the mail domain wants delivered to one peer. It is
@@ -135,6 +137,9 @@ type outboxRow struct {
 // There is no batch and no cross-peer ordering: five destinations are five
 // independent deliveries (design 4).
 func (s *Service) Drain(ctx context.Context, limit int) (int, error) {
+	if err := s.Backfill(ctx); err != nil {
+		s.log.Error("backfill failed", "error", err)
+	}
 	peers, err := s.duePeers(ctx)
 	if err != nil {
 		return 0, err
@@ -224,6 +229,11 @@ func (s *Service) claim(ctx context.Context, peer string, limit int) ([]outboxRo
 
 // attempt makes one delivery attempt and records what happened.
 func (s *Service) attempt(ctx context.Context, row outboxRow) {
+	// A row whose budget has run out is not tried again (RFC 6.4).
+	if s.db.Now().Sub(row.CreatedAt) >= s.cfg.RetryBudget {
+		s.owe(ctx, row, 0)
+		return
+	}
 	status, retryAfter, refused, err := s.post(ctx, row)
 
 	switch {
@@ -241,10 +251,10 @@ func (s *Service) attempt(ctx context.Context, row outboxRow) {
 		}
 		s.fail(ctx, row, status, detail)
 
-	case s.db.Now().Sub(row.CreatedAt) >= RetryBudget:
+	case s.db.Now().Sub(row.CreatedAt) >= s.cfg.RetryBudget:
 		// The 72-hour budget is a hard stop; retrying past it is forbidden and
 		// the sender is owed an answer.
-		s.fail(ctx, row, status, "timed_out")
+		s.owe(ctx, row, status)
 
 	default:
 		detail := fmt.Sprintf("peer answered %d", status)
@@ -428,6 +438,11 @@ func (s *Service) reschedule(ctx context.Context, row outboxRow, httpStatus int,
 		// A peer that told us how long to wait is obeyed, even past the cap.
 		delay = retryAfter
 	}
+	// Never past the budget: the row is looked at again when it runs out, so
+	// the sender hears then and not a backoff later.
+	if deadline := row.CreatedAt.Add(s.cfg.RetryBudget); s.db.Now().Add(delay).After(deadline) {
+		delay = deadline.Sub(s.db.Now())
+	}
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE "federation_outbox" SET "status" = 'pending', "attempts" = "attempts" + 1, `+
 			`"last_http_status" = ?, "last_error" = ?, "next_retry_at" = ?, `+
@@ -458,7 +473,22 @@ func (s *Service) fail(ctx context.Context, row outboxRow, httpStatus int, detai
 	s.finish(ctx, row, "permanent_failure", httpStatus, detail)
 	s.log.Error("envelope permanently failed",
 		"peer", row.PeerDomain, "envelope", row.EnvelopeID, "status", httpStatus, "detail", detail)
+	// 404 is only ever no_recipients: none of them exist there (RFC 6.3).
+	s.bounce(ctx, row, httpStatus, detail, httpStatus == http.StatusNotFound, false)
+}
 
+// owe retires a row that used up its retry budget without a response. The
+// peer may only have been away, so the message is kept and sent again once it
+// answers (Backfill), and the sender is told both things (RFC 6.4, 6.5).
+func (s *Service) owe(ctx context.Context, row outboxRow, httpStatus int) {
+	s.finish(ctx, row, "owed", httpStatus, "timed_out")
+	s.log.Warn("envelope timed out, owed until the peer answers",
+		"peer", row.PeerDomain, "envelope", row.EnvelopeID)
+	s.bounce(ctx, row, httpStatus, "timed_out", false, true)
+}
+
+// bounce tells the sender of a row's message that it did not arrive.
+func (s *Service) bounce(ctx context.Context, row outboxRow, httpStatus int, detail string, refused, backfill bool) {
 	if s.deliverer == nil {
 		return
 	}
@@ -472,13 +502,13 @@ func (s *Service) fail(ctx context.Context, row outboxRow, httpStatus int, detai
 		SenderEmail:  envelope.Message.SenderEmail,
 		Subject:      envelope.Thread.Subject,
 		ThreadFedID:  envelope.Thread.FederationID,
-		// 404 is only ever no_recipients: none of them exist there (RFC 6.3).
-		Refused:    httpStatus == http.StatusNotFound,
-		Recipients: envelope.Recipients,
-		PeerDomain: row.PeerDomain,
-		EnvelopeID: row.EnvelopeID,
-		HTTPStatus: httpStatus,
-		ErrorCode:  detail,
+		Refused:      refused,
+		Backfill:     backfill,
+		Recipients:   envelope.Recipients,
+		PeerDomain:   row.PeerDomain,
+		EnvelopeID:   row.EnvelopeID,
+		HTTPStatus:   httpStatus,
+		ErrorCode:    detail,
 	}); err != nil {
 		s.log.Error("could not write a bounce", "envelope", row.EnvelopeID, "error", err)
 	}
@@ -580,4 +610,101 @@ func (s *Service) Outbox(ctx context.Context) ([]OutboxEntry, error) {
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+// Backfill sends again the messages owed to peers that answer again. A peer
+// is checked at most once per BackfillProbe, so one that stays down costs a
+// descriptor request now and then and nothing more. Each owed message goes
+// out as a new envelope with a new id and a budget of its own, with the same
+// thread, message and recipients, and the owed row is marked backfilled so it
+// is sent again only once (RFC 6.4).
+func (s *Service) Backfill(ctx context.Context) error {
+	peers, err := store.SelectStrings(ctx, s.db,
+		`SELECT DISTINCT "peer_domain" FROM "federation_outbox" WHERE "status" = 'owed'`)
+	if err != nil {
+		return fmt.Errorf("list owed peers: %w", err)
+	}
+	now := s.db.Now()
+	for _, peer := range peers {
+		s.probedMu.Lock()
+		last, seen := s.probed[peer]
+		due := !seen || now.Sub(last) >= s.cfg.BackfillProbe
+		if due {
+			s.probed[peer] = now
+		}
+		s.probedMu.Unlock()
+		if !due || !s.reachable(ctx, peer) {
+			continue
+		}
+		if err := s.requeueOwed(ctx, peer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// requeueOwed turns every row owed to a peer into a new pending envelope.
+func (s *Service) requeueOwed(ctx context.Context, peer string) error {
+	return s.db.Tx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx,
+			`SELECT "id", "origin_domain", "body", "related_id" FROM "federation_outbox" `+
+				`WHERE "status" = 'owed' AND "peer_domain" = ? ORDER BY "id"`, peer)
+		if err != nil {
+			return fmt.Errorf("list owed envelopes: %w", err)
+		}
+		type owed struct {
+			id        int64
+			origin    string
+			body      string
+			relatedID sql.NullInt64
+		}
+		var all []owed
+		for rows.Next() {
+			var o owed
+			if err := rows.Scan(&o.id, &o.origin, &o.body, &o.relatedID); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan owed envelope: %w", err)
+			}
+			all = append(all, o)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("list owed envelopes: %w", err)
+		}
+
+		now := s.db.Now()
+		for _, o := range all {
+			var envelope Envelope
+			if err := json.Unmarshal([]byte(o.body), &envelope); err != nil {
+				return fmt.Errorf("read owed envelope %d: %w", o.id, err)
+			}
+			envelopeID, err := NewUUID()
+			if err != nil {
+				return err
+			}
+			envelope.EnvelopeID = envelopeID
+			envelope.OriginSentAt = FormatTimestamp(now)
+			body, err := json.Marshal(envelope)
+			if err != nil {
+				return fmt.Errorf("serialize backfilled envelope: %w", err)
+			}
+			var relatedID any
+			if o.relatedID.Valid {
+				relatedID = o.relatedID.Int64
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO "federation_outbox" ("kind", "peer_domain", "origin_domain", "body", `+
+					`"idempotency_key", "related_id", "status", "next_retry_at", "created_at") `+
+					"VALUES ('envelope',?,?,?,?,?, 'pending', ?, ?)",
+				peer, o.origin, string(body), envelopeID, relatedID, now, now); err != nil {
+				return fmt.Errorf("re-queue owed envelope %d: %w", o.id, err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE "federation_outbox" SET "status" = 'backfilled' WHERE "id" = ?`, o.id); err != nil {
+				return fmt.Errorf("mark envelope %d backfilled: %w", o.id, err)
+			}
+			s.log.Info("backfilling an owed envelope", "peer", peer, "was", o.id, "envelope", envelopeID)
+		}
+		return nil
+	})
 }

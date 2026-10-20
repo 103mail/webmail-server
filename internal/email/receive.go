@@ -457,6 +457,9 @@ func (s *Service) Bounce(ctx context.Context, b federation.BounceNotice) error {
 		"Your message could not be delivered.\n\n"+
 			"Recipients: %s\nDestination domain: %s\nReason: %s\nEnvelope: %s\n",
 		strings.Join(b.Recipients, ", "), b.PeerDomain, reason, b.EnvelopeID)
+	if b.Backfill {
+		body += fmt.Sprintf("\nIt will be sent again when %s can be reached.\n", b.PeerDomain)
+	}
 
 	senderEmail := store.Address(b.SenderEmail)
 	now := s.db.Now()

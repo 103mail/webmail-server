@@ -197,6 +197,16 @@ port 8081 of its Domain's loopback address, for the end-to-end suite:
 
 A production deployment must not set `WEBMAIL_CONTROL_ADDR`.
 
+**Outages are staged from outside.** Every container carries a
+`webmail.domain` label naming its Domain, which is how the end-to-end suite
+takes a Domain down (`docker stop` on its containers) and brings it back. Each
+worker's retry budget is `${RETRY_BUDGET_<DOMAIN>:-72h}`, for example
+`RETRY_BUDGET_103MAIL_COM=2m docker compose up -d --no-deps --force-recreate
+worker-103mail`, which a story uses to see a timeout in minutes. Anything
+shorter than 72 hours is not conformant (RFC 6.4) and is for testing only. The
+workers check every 10 seconds whether a peer they owe messages to is back
+(`WEBMAIL_BACKFILL_PROBE`), where production uses 5 minutes.
+
 ## Checking it works
 
     curl --cacert certs/webmail-local-ca.crt https://webmail.103mail.com/health

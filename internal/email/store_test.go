@@ -1090,3 +1090,25 @@ func TestRemoteRecipientsAreQueued(t *testing.T) {
 		t.Errorf("Alice has %d of the remote recipients as contacts, want both", n)
 	}
 }
+
+// A bounce for a message that timed out tells the sender it will be sent
+// again when the Domain is back (RFC 6.5).
+func TestATimedOutBounceSaysItWillBeResent(t *testing.T) {
+	f := newFixture(t)
+	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
+	if err := f.svc.Bounce(f.ctx, federation.BounceNotice{
+		OriginDomain: "example.test", SenderEmail: "alice@example.test", Subject: "Report",
+		Recipients: []string{"erin@peer.test"}, PeerDomain: "peer.test", EnvelopeID: "e",
+		ErrorCode: "timed_out", Backfill: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	threads, _ := f.svc.ListThreads(f.ctx, alice, aliceInbox, "")
+	if len(threads) != 1 {
+		t.Fatalf("Alice has %d threads", len(threads))
+	}
+	messages, _ := f.svc.ListMessages(f.ctx, alice, threads[0].ThreadID, "")
+	if len(messages) != 1 || !strings.Contains(messages[0].Body, "will be sent again when peer.test can be reached") {
+		t.Errorf("the bounce reads %q", messages[0].Body)
+	}
+}

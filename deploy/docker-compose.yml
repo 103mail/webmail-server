@@ -61,6 +61,8 @@ x-web: &web
 services:
   # ── 103mail.com ────────────────────────────────────────────────────────────
   api-103mail:
+    labels:
+      webmail.domain: 103mail.com
     <<: *api
     environment:
       <<: *api-env
@@ -84,6 +86,8 @@ services:
       federation:
 
   web-103mail:
+    labels:
+      webmail.domain: 103mail.com
     <<: *web
     environment:
       WEBMAIL_DOMAIN: 103mail.com
@@ -106,11 +110,16 @@ services:
   # what ages out with it. Separate from the API so a compose never waits on a
   # peer (ADR 17, principle 5).
   worker-103mail:
+    labels:
+      webmail.domain: 103mail.com
     <<: *api
     entrypoint: ["webmail-worker"]
     environment:
       <<: *api-env
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
+      # The RFC's 72 hours unless a story shortens it (deploy/README.md).
+      WEBMAIL_RETRY_BUDGET: ${RETRY_BUDGET_103MAIL_COM:-72h}
+      WEBMAIL_BACKFILL_PROBE: 10s
     volumes:
       - ./data/103mail.com:/data
       - ./domain/103mail.com/federation.json:/etc/webmail/federation.json:ro
@@ -130,6 +139,8 @@ services:
   # Chat WebSockets terminate here, not in the API, so the API tier stays
   # stateless and a deploy does not drop every open socket (ADR 13, ADR 18).
   ws-103mail:
+    labels:
+      webmail.domain: 103mail.com
     build:
       context: ../../ws2api
       dockerfile: ../webmail-server/deploy/ws2api.Dockerfile
@@ -147,6 +158,8 @@ services:
 
   # ── example.com ────────────────────────────────────────────────────────────
   api-example:
+    labels:
+      webmail.domain: example.com
     <<: *api
     environment:
       <<: *api-env
@@ -170,6 +183,8 @@ services:
       federation:
 
   web-example:
+    labels:
+      webmail.domain: example.com
     <<: *web
     environment:
       WEBMAIL_DOMAIN: example.com
@@ -192,11 +207,16 @@ services:
   # what ages out with it. Separate from the API so a compose never waits on a
   # peer (ADR 17, principle 5).
   worker-example:
+    labels:
+      webmail.domain: example.com
     <<: *api
     entrypoint: ["webmail-worker"]
     environment:
       <<: *api-env
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
+      # The RFC's 72 hours unless a story shortens it (deploy/README.md).
+      WEBMAIL_RETRY_BUDGET: ${RETRY_BUDGET_EXAMPLE_COM:-72h}
+      WEBMAIL_BACKFILL_PROBE: 10s
     volumes:
       - ./data/example.com:/data
       - ./domain/example.com/federation.json:/etc/webmail/federation.json:ro
@@ -216,6 +236,8 @@ services:
   # Chat WebSockets terminate here, not in the API, so the API tier stays
   # stateless and a deploy does not drop every open socket (ADR 13, ADR 18).
   ws-example:
+    labels:
+      webmail.domain: example.com
     build:
       context: ../../ws2api
       dockerfile: ../webmail-server/deploy/ws2api.Dockerfile
@@ -235,6 +257,8 @@ services:
   # A Domain on a subdomain (RFC 4.1.1). It is not acme.test and shares
   # nothing with it: its own key, its own database, its own hostname.
   api-acme:
+    labels:
+      webmail.domain: mail.acme.test
     <<: *api
     environment:
       <<: *api-env
@@ -257,6 +281,8 @@ services:
       federation:
 
   web-acme:
+    labels:
+      webmail.domain: mail.acme.test
     <<: *web
     environment:
       WEBMAIL_DOMAIN: mail.acme.test
@@ -276,11 +302,16 @@ services:
         aliases: [webmail.mail.acme.test]
 
   worker-acme:
+    labels:
+      webmail.domain: mail.acme.test
     <<: *api
     entrypoint: ["webmail-worker"]
     environment:
       <<: *api-env
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
+      # The RFC's 72 hours unless a story shortens it (deploy/README.md).
+      WEBMAIL_RETRY_BUDGET: ${RETRY_BUDGET_MAIL_ACME_TEST:-72h}
+      WEBMAIL_BACKFILL_PROBE: 10s
     volumes:
       - ./data/mail.acme.test:/data
       - ./domain/mail.acme.test/federation.json:/etc/webmail/federation.json:ro
@@ -301,6 +332,8 @@ services:
   # wire (RFC 4.1.1). The services are called "parent" because "acme" is
   # mail.acme.test.
   api-parent:
+    labels:
+      webmail.domain: acme.test
     <<: *api
     environment:
       <<: *api-env
@@ -323,6 +356,8 @@ services:
       federation:
 
   web-parent:
+    labels:
+      webmail.domain: acme.test
     <<: *web
     environment:
       WEBMAIL_DOMAIN: acme.test
@@ -342,11 +377,16 @@ services:
         aliases: [webmail.acme.test]
 
   worker-parent:
+    labels:
+      webmail.domain: acme.test
     <<: *api
     entrypoint: ["webmail-worker"]
     environment:
       <<: *api-env
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
+      # The RFC's 72 hours unless a story shortens it (deploy/README.md).
+      WEBMAIL_RETRY_BUDGET: ${RETRY_BUDGET_ACME_TEST:-72h}
+      WEBMAIL_BACKFILL_PROBE: 10s
     volumes:
       - ./data/acme.test:/data
       - ./domain/acme.test/federation.json:/etc/webmail/federation.json:ro

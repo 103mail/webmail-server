@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mevdschee/webmail-server/internal/store"
@@ -47,6 +48,10 @@ const (
 	RetryBase   = 30 * time.Second
 	RetryCap    = time.Hour
 	RetryBudget = 72 * time.Hour
+
+	// BackfillProbe is how often a peer that is owed messages is checked
+	// for being back. It is ours, not the RFC's (RFC 6.4).
+	BackfillProbe = 5 * time.Minute
 
 	// Lease is how long a worker holds the outbox rows it claimed. It is ours,
 	// not the RFC's, and only has to outlast one delivery pass: a worker that
@@ -87,6 +92,24 @@ type Config struct {
 	// certificates from a private CA; adding a CA to our own trust store is not
 	// the same as skipping verification, which this package never does.
 	ExtraCAFile string `json:"extraCaFile"`
+	// RetryBudget is the RFC's 72 hours. WEBMAIL_RETRY_BUDGET shortens it,
+	// which only a test stack does: a Domain that gives up early is not
+	// conformant (RFC 6.4). BackfillProbe comes from WEBMAIL_BACKFILL_PROBE.
+	RetryBudget   time.Duration `json:"-"`
+	BackfillProbe time.Duration `json:"-"`
+}
+
+// durationFromEnv reads a Go duration such as "2m" from the environment.
+func durationFromEnv(name string, fallback time.Duration) (time.Duration, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%s=%q is not a positive duration such as 2m", name, v)
+	}
+	return d, nil
 }
 
 // LoadConfig reads the file named by WEBMAIL_FEDERATION_CONFIG. An unset
@@ -109,6 +132,12 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.MaxAttachmentBytes <= 0 {
 		cfg.MaxAttachmentBytes = DefaultMaxAttachmentBytes
+	}
+	if cfg.RetryBudget, err = durationFromEnv("WEBMAIL_RETRY_BUDGET", RetryBudget); err != nil {
+		return nil, err
+	}
+	if cfg.BackfillProbe, err = durationFromEnv("WEBMAIL_BACKFILL_PROBE", BackfillProbe); err != nil {
+		return nil, err
 	}
 	for i := range cfg.Domains {
 		d := &cfg.Domains[i]
@@ -214,7 +243,10 @@ type BounceNotice struct {
 	// Refused means the recipients do not exist at the peer, so they are not
 	// members of the thread and later messages should not go to them. A peer
 	// that was unreachable says nothing of the kind (RFC 6.5).
-	Refused    bool
+	Refused bool
+	// Backfill means the message timed out and will be sent again when the
+	// peer answers (RFC 6.4).
+	Backfill   bool
 	Recipients []string
 	PeerDomain string
 	EnvelopeID string
@@ -238,6 +270,14 @@ type Service struct {
 
 	deliverer Deliverer
 
+	// reachable reports whether a peer answers, which is when it is backfilled
+	// (RFC 6.4). Tests replace it; it is fetchDescriptor otherwise.
+	reachable func(ctx context.Context, domain string) bool
+	// probed is when each owed peer was last checked, so a peer that stays
+	// down is asked at most once per BackfillProbe.
+	probedMu sync.Mutex
+	probed   map[string]time.Time
+
 	// worker names this process in the outbox leases it takes, so a row shows
 	// which worker holds it.
 	worker string
@@ -253,8 +293,20 @@ func New(db *store.DB, cfg *Config, log *slog.Logger, deliverer Deliverer) (*Ser
 	if err != nil {
 		return nil, err
 	}
+	if cfg != nil {
+		if cfg.RetryBudget <= 0 {
+			cfg.RetryBudget = RetryBudget
+		}
+		if cfg.BackfillProbe <= 0 {
+			cfg.BackfillProbe = BackfillProbe
+		}
+	}
 	s := &Service{db: db, cfg: cfg, log: log, deliverer: deliverer, local: map[string]*LocalDomain{},
-		worker: worker}
+		worker: worker, probed: map[string]time.Time{}}
+	s.reachable = func(ctx context.Context, domain string) bool {
+		descriptor, err := s.fetchDescriptor(ctx, domain)
+		return err == nil && s.storePeer(ctx, descriptor) == nil
+	}
 	if cfg == nil {
 		return s, nil
 	}

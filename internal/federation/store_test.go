@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -309,5 +310,152 @@ func TestBouncesSayWhenRecipientsAreUnknown(t *testing.T) {
 		if b.ThreadFedID != "0192f0c0-0000-7000-8000-000000000001" {
 			t.Errorf("bounce %d names thread %q", i, b.ThreadFedID)
 		}
+	}
+}
+
+// An envelope that used up its budget is owed, not abandoned: the sender is
+// bounced with a note that it will be sent again, and nobody is refused
+// (RFC 6.4).
+func TestTimedOutEnvelopesAreOwed(t *testing.T) {
+	db := storetest.Open(t)
+	ctx := context.Background()
+	s := newStoreService(t, db)
+	d := &recordingDeliverer{}
+	s.Attach(d)
+	enqueue(t, s, "peer.test", 1)
+	rows, err := s.claim(ctx, "peer.test", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("claim = %d, %v", len(rows), err)
+	}
+	s.owe(ctx, rows[0], 0)
+	if n, _ := store.SelectInt(ctx, db, `SELECT COUNT(*) FROM "federation_outbox" WHERE "status" = 'owed'`); n != 1 {
+		t.Errorf("%d owed rows, want the timed-out one", n)
+	}
+	if len(d.bounces) != 1 || d.bounces[0].ErrorCode != "timed_out" || !d.bounces[0].Backfill || d.bounces[0].Refused {
+		t.Errorf("bounces = %+v, want one timed_out bounce that promises a resend", d.bounces)
+	}
+}
+
+// Once an owed peer answers again, its messages are sent again as new
+// envelopes with the same message, each once (RFC 6.4).
+func TestBackfillResendsOwedEnvelopes(t *testing.T) {
+	db := storetest.Open(t)
+	now := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	db.Clock = func() time.Time { return now }
+	ctx := context.Background()
+	s := newStoreService(t, db)
+	s.Attach(&recordingDeliverer{})
+	up := false
+	s.reachable = func(context.Context, string) bool { return up }
+	enqueue(t, s, "peer.test", 2)
+	rows, err := s.claim(ctx, "peer.test", 10)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("claim = %d, %v", len(rows), err)
+	}
+	for _, row := range rows {
+		s.owe(ctx, row, 0)
+	}
+	pending := func() int64 {
+		n, _ := store.SelectInt(ctx, db, `SELECT COUNT(*) FROM "federation_outbox" WHERE "status" = 'pending'`)
+		return n
+	}
+
+	if err := s.Backfill(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := pending(); n != 0 {
+		t.Fatalf("%d envelopes re-queued while the peer is still down", n)
+	}
+
+	up = true
+	if err := s.Backfill(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := pending(); n != 0 {
+		t.Fatalf("%d envelopes re-queued before the probe interval passed", n)
+	}
+	now = now.Add(s.cfg.BackfillProbe + time.Second)
+	if err := s.Backfill(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := pending(); n != 2 {
+		t.Fatalf("%d envelopes re-queued, want both owed ones", n)
+	}
+	var original, resent Envelope
+	bodies, err := store.SelectStrings(ctx, db, `SELECT "body" FROM "federation_outbox" ORDER BY "id"`)
+	if err != nil || len(bodies) != 4 {
+		t.Fatalf("%d outbox rows, %v", len(bodies), err)
+	}
+	if err := json.Unmarshal([]byte(bodies[0]), &original); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(bodies[2]), &resent); err != nil {
+		t.Fatal(err)
+	}
+	if resent.EnvelopeID == original.EnvelopeID || resent.Message.FederationID != original.Message.FederationID ||
+		resent.Thread.FederationID != original.Thread.FederationID {
+		t.Errorf("resent %+v, original %+v: want a new envelope with the same message", resent, original)
+	}
+
+	now = now.Add(s.cfg.BackfillProbe + time.Second)
+	if err := s.Backfill(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := pending(); n != 2 {
+		t.Errorf("%d pending after a second backfill, want no more than the first", n)
+	}
+}
+
+// The retry budget is the RFC's 72 hours unless a test stack shortens it.
+func TestRetryBudgetCanBeShortenedForTests(t *testing.T) {
+	db := storetest.Open(t)
+	if got := newStoreService(t, db).cfg.RetryBudget; got != RetryBudget {
+		t.Errorf("default budget %s, want %s", got, RetryBudget)
+	}
+	if got, err := durationFromEnv("WEBMAIL_TEST_UNSET", RetryBudget); err != nil || got != RetryBudget {
+		t.Errorf("unset = %s, %v", got, err)
+	}
+	t.Setenv("WEBMAIL_TEST_BUDGET", "2m")
+	if got, err := durationFromEnv("WEBMAIL_TEST_BUDGET", RetryBudget); err != nil || got != 2*time.Minute {
+		t.Errorf("2m = %s, %v", got, err)
+	}
+	t.Setenv("WEBMAIL_TEST_BUDGET", "soon")
+	if _, err := durationFromEnv("WEBMAIL_TEST_BUDGET", RetryBudget); err == nil {
+		t.Error("an unreadable duration was accepted")
+	}
+}
+
+// A retry is never scheduled past the budget, and a row whose budget has run
+// out is owed at once rather than tried again, so the sender hears about it
+// when the budget ends and not some backoff later (RFC 6.4).
+func TestRetriesStopAtTheBudget(t *testing.T) {
+	db := storetest.Open(t)
+	now := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	db.Clock = func() time.Time { return now }
+	ctx := context.Background()
+	s := newStoreService(t, db)
+	s.cfg.RetryBudget = 2 * time.Minute
+	s.Attach(&recordingDeliverer{})
+	enqueue(t, s, "peer.test", 1)
+	rows, _ := s.claim(ctx, "peer.test", 10)
+	rows[0].Attempts = 10 // a backoff of up to an hour
+	s.reschedule(ctx, rows[0], 503, "unavailable", 0)
+	var next time.Time
+	if err := db.QueryRowContext(ctx, `SELECT "next_retry_at" FROM "federation_outbox"`).Scan(&next); err != nil {
+		t.Fatal(err)
+	}
+	if deadline := rows[0].CreatedAt.Add(2 * time.Minute); next.After(deadline) {
+		t.Errorf("next retry at %s, after the budget ends at %s", next, deadline)
+	}
+
+	now = now.Add(3 * time.Minute)
+	rows, _ = s.claim(ctx, "peer.test", 10)
+	if len(rows) != 1 {
+		t.Fatalf("claimed %d rows", len(rows))
+	}
+	s.attempt(ctx, rows[0])
+	var status string
+	if err := db.QueryRowContext(ctx, `SELECT "status" FROM "federation_outbox"`).Scan(&status); err != nil || status != "owed" {
+		t.Errorf("status %q, %v; want owed without another attempt", status, err)
 	}
 }
