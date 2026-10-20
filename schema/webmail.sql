@@ -25,7 +25,7 @@ CREATE TABLE `alias` (
   KEY `customer_id` (`customer_id`),
   KEY `mailbox_id` (`mailbox_id`),
   CONSTRAINT `alias_ibfk_3` FOREIGN KEY (`mailbox_id`) REFERENCES `mailbox` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `alias_ibfk_4` FOREIGN KEY (`customer_id`) REFERENCES `user` (`id`) ON DELETE CASCADE
+  CONSTRAINT `fk_alias_customer_id` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 DROP TABLE IF EXISTS `audit_log`;
 CREATE TABLE `audit_log` (
@@ -227,7 +227,7 @@ CREATE TABLE `folder` (
   PRIMARY KEY (`id`),
   KEY `mailbox_id` (`mailbox_id`),
   KEY `customer_id` (`customer_id`),
-  CONSTRAINT `folder_ibfk_3` FOREIGN KEY (`customer_id`) REFERENCES `user` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_folder_customer_id` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE,
   CONSTRAINT `folder_ibfk_4` FOREIGN KEY (`mailbox_id`) REFERENCES `mailbox` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 DROP TABLE IF EXISTS `g_attachment`;
@@ -415,7 +415,7 @@ CREATE TABLE `mailbox` (
   KEY `user_id` (`user_id`),
   CONSTRAINT `mailbox_ibfk_6` FOREIGN KEY (`default_folder_id`) REFERENCES `folder` (`id`) ON DELETE SET NULL,
   CONSTRAINT `mailbox_ibfk_7` FOREIGN KEY (`default_alias_id`) REFERENCES `alias` (`id`) ON DELETE SET NULL,
-  CONSTRAINT `mailbox_ibfk_8` FOREIGN KEY (`customer_id`) REFERENCES `user` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_mailbox_customer_id` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE,
   CONSTRAINT `mailbox_ibfk_9` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 DROP TABLE IF EXISTS `notification_preference`;
@@ -477,7 +477,7 @@ CREATE TABLE `message` (
   KEY `thread_id` (`thread_id`),
   KEY `g_message_id` (`g_message_id`),
   KEY `customer_id` (`customer_id`),
-  CONSTRAINT `message_ibfk_6` FOREIGN KEY (`customer_id`) REFERENCES `user` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_message_customer_id` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE,
   CONSTRAINT `message_ibfk_7` FOREIGN KEY (`thread_id`) REFERENCES `thread` (`id`) ON DELETE CASCADE,
   CONSTRAINT `message_ibfk_8` FOREIGN KEY (`g_message_id`) REFERENCES `g_message` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -555,7 +555,7 @@ CREATE TABLE `thread` (
   KEY `customer_id` (`customer_id`),
   KEY `g_thread_id` (`g_thread_id`),
   KEY `folder_id` (`folder_id`),
-  CONSTRAINT `thread_ibfk_5` FOREIGN KEY (`customer_id`) REFERENCES `user` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_thread_customer_id` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE,
   CONSTRAINT `thread_ibfk_6` FOREIGN KEY (`folder_id`) REFERENCES `folder` (`id`) ON DELETE CASCADE,
   CONSTRAINT `thread_ibfk_7` FOREIGN KEY (`g_thread_id`) REFERENCES `g_thread` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -606,8 +606,7 @@ CREATE TABLE `user` (
   `modified_at` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   KEY `customer_id` (`customer_id`),
-  CONSTRAINT `user_ibfk_3` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `user_ibfk_4` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE
+  CONSTRAINT `user_ibfk_3` FOREIGN KEY (`customer_id`) REFERENCES `customer` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 SET foreign_key_checks = 1;

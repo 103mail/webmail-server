@@ -1,4 +1,8 @@
-// Readable model of the webmail schema. The authoritative DDL is webmail.sql.
+// Readable model of the webmail schema, in portable types (ADR 19). It renders
+// to PostgreSQL as written, and to SQLite with database_type set to 'SQLite'
+// or with `dbml-tools migrate` against a sqlite:// DSN. SQLite needs dbml-tools
+// 0.9.7 or later. webmail.sql is the MySQL DDL the server runs on until ADR 19
+// is implemented, so the two now differ in column types.
 //
 // Generated with `dbml-tools todbml`, then corrected by hand in three places
 // because that round trip does not currently survive its own tooling:
@@ -9,15 +13,15 @@
 // Regenerating this file will reintroduce the first two.
 
 Project "webmail" {
-  database_type: 'MariaDB'
+  database_type: 'PostgreSQL'
 }
 
 Table "alias" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
   "email" varchar(255) [unique, not null]
   "name" varchar(255) [not null]
-  "mailbox_id" bigint(20) [not null]
+  "mailbox_id" bigint [not null]
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -26,12 +30,12 @@ Table "alias" {
 }
 
 Table "attachment" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "message_id" bigint(20) [not null]
-  "g_attachment_id" bigint(20) [not null]
-  "read_at" datetime
-  "deleted_at" datetime
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "message_id" bigint [not null]
+  "g_attachment_id" bigint [not null]
+  "read_at" timestamp
+  "deleted_at" timestamp
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -41,12 +45,12 @@ Table "attachment" {
 }
 
 Table "audit_log" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20)
-  "user_id" bigint(20)
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint
+  "user_id" bigint
   "username" varchar(255) [not null]
-  "is_admin" tinyint(1) [not null, default: 0]
-  "created_at" datetime [not null]
+  "is_admin" boolean [not null, default: false]
+  "created_at" timestamp [not null]
   "operation" audit_log_operation [not null]
   "entity" varchar(255) [not null]
   "identifier" varchar(255) [not null]
@@ -62,14 +66,14 @@ Table "audit_log" {
 }
 
 Table "chat" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "mailbox_id" bigint(20) [not null]
-  "g_chat_id" bigint(20) [not null]
-  "last_read_message_id" bigint(20)
-  "muted" tinyint(1) [not null, default: 0]
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "mailbox_id" bigint [not null]
+  "g_chat_id" bigint [not null]
+  "last_read_message_id" bigint
+  "muted" boolean [not null, default: false]
   "notification_preference" chat_notification_preference [not null, default: 'all']
-  "deleted_at" datetime
+  "deleted_at" timestamp
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -84,15 +88,15 @@ Table "chat" {
 // in URL paths and proxy logs. It is minted by an authenticated request, claimed
 // once when the socket connects, and useless afterwards.
 Table "chat_session" {
-  "id" bigint(20) [pk, increment, not null]
+  "id" bigint [pk, increment, not null]
   "client_id" varchar(64) [unique, not null]
-  "customer_id" bigint(20) [not null]
-  "user_id" bigint(20) [not null]
-  "created_at" datetime [not null, default: 'current_timestamp()']
-  "expires_at" datetime [not null]
-  "connected_at" datetime
-  "last_seen_at" datetime
-  "closed_at" datetime
+  "customer_id" bigint [not null]
+  "user_id" bigint [not null]
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "expires_at" timestamp [not null]
+  "connected_at" timestamp
+  "last_seen_at" timestamp
+  "closed_at" timestamp
 
   indexes {
     ("user_id") [name: "user_id"]
@@ -102,12 +106,12 @@ Table "chat_session" {
 }
 
 Table "chat_message" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "chat_id" bigint(20) [not null]
-  "g_chat_message_id" bigint(20) [not null]
-  "delivered_at" datetime
-  "read_at" datetime
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "chat_id" bigint [not null]
+  "g_chat_message_id" bigint [not null]
+  "delivered_at" timestamp
+  "read_at" timestamp
 
   indexes {
     ("chat_id") [name: "chat_id"]
@@ -117,12 +121,12 @@ Table "chat_message" {
 }
 
 Table "contact" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
   "email" varchar(255) [not null]
   "name" varchar(255) [not null]
-  "created_at" datetime [not null, default: 'current_timestamp()']
-  "deleted_at" datetime
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamp
 
   indexes {
     ("customer_id", "email") [unique, name: "customer_id_email"]
@@ -130,9 +134,9 @@ Table "contact" {
 }
 
 Table "customer" {
-  "id" bigint(20) [pk, increment, not null]
+  "id" bigint [pk, increment, not null]
   "name" varchar(255) [not null]
-  "default_mailbox_id" bigint(20)
+  "default_mailbox_id" bigint
 
   indexes {
     ("default_mailbox_id") [name: "default_mailbox_id"]
@@ -140,20 +144,20 @@ Table "customer" {
 }
 
 Table "domain" {
-  "id" int(11) [pk, increment, not null]
+  "id" integer [pk, increment, not null]
   "name" varchar(255) [unique, not null]
-  "customer_id" bigint(20)
+  "customer_id" bigint
   // Federation (ADR 17). A local row is a Domain this Server is authoritative
   // for; a remote row is a peer descriptor cached under trust on first use.
-  "is_local" tinyint(1) [not null, default: 0]
+  "is_local" boolean [not null, default: false]
   "public_key" varchar(255) [not null, default: '']
   "previous_public_keys" varchar(1024) [not null, default: '']
   "versions" varchar(255) [not null, default: '']
-  "is_registrar" tinyint(1) [not null, default: 0]
-  "max_envelope_bytes" bigint(20) [not null, default: 10485760]
-  "max_attachment_bytes" bigint(20) [not null, default: 26214400]
-  "discovered_at" datetime
-  "discovery_failed_at" datetime
+  "is_registrar" boolean [not null, default: false]
+  "max_envelope_bytes" bigint [not null, default: 10485760]
+  "max_attachment_bytes" bigint [not null, default: 26214400]
+  "discovered_at" timestamp
+  "discovery_failed_at" timestamp
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -162,7 +166,7 @@ Table "domain" {
 }
 
 Table "email_template" {
-  "id" int(11) [pk, increment, not null]
+  "id" integer [pk, increment, not null]
   "name" varchar(255) [not null]
   "language" varchar(2) [not null]
   "sender_name" varchar(255) [not null]
@@ -183,23 +187,24 @@ Table "email_template" {
 // the delivery machinery. The row is written in the same transaction as the
 // g_* rows it describes, so a crash after commit re-sends rather than loses.
 Table "federation_outbox" {
-  "id" bigint(20) [pk, increment, not null]
+  "id" bigint [pk, increment, not null]
   "kind" varchar(32) [not null, default: 'envelope']
   "peer_domain" varchar(255) [not null]
   "origin_domain" varchar(255) [not null]
   // The exact bytes to send. Signed at send time rather than here, because the
   // signing input covers the Date and Nonce headers, which have to be fresh on
-  // every attempt. The body itself is never re-serialized.
-  "body" longblob [not null]
+  // every attempt. The body itself is never re-serialized. It is UTF-8 JSON
+  // (RFC 5.1), so text holds it byte for byte on every engine.
+  "body" text [not null]
   "idempotency_key" varchar(36) [not null]
-  "related_id" bigint(20)
+  "related_id" bigint
   "status" varchar(20) [not null, default: 'pending']
-  "attempts" int(11) [not null, default: 0]
+  "attempts" integer [not null, default: 0]
   "last_error" text
-  "last_http_status" int(11)
-  "next_retry_at" datetime [not null, default: 'current_timestamp()']
-  "created_at" datetime [not null, default: 'current_timestamp()']
-  "delivered_at" datetime
+  "last_http_status" integer
+  "next_retry_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "delivered_at" timestamp
 
   indexes {
     ("origin_domain", "idempotency_key") [unique, name: "origin_idempotency"]
@@ -211,10 +216,10 @@ Table "federation_outbox" {
 // Envelopes already accepted, so a redelivery replays the original response
 // without inserting the message twice. Retained at least 96 hours (RFC 5.4).
 Table "federation_inbox" {
-  "id" bigint(20) [pk, increment, not null]
+  "id" bigint [pk, increment, not null]
   "sender_domain" varchar(255) [not null]
   "envelope_id" varchar(36) [not null]
-  "received_at" datetime [not null, default: 'current_timestamp()']
+  "received_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
 
   indexes {
     ("sender_domain", "envelope_id") [unique, name: "sender_envelope"]
@@ -224,11 +229,11 @@ Table "federation_inbox" {
 
 // Nonces seen inside the replay window, per sender and endpoint kind (RFC 9.4).
 Table "federation_nonce" {
-  "id" bigint(20) [pk, increment, not null]
+  "id" bigint [pk, increment, not null]
   "sender_domain" varchar(255) [not null]
   "endpoint" varchar(32) [not null, default: 'inbound']
   "nonce" varchar(64) [not null]
-  "seen_at" datetime [not null, default: 'current_timestamp()']
+  "seen_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
 
   indexes {
     ("sender_domain", "endpoint", "nonce") [unique, name: "sender_endpoint_nonce"]
@@ -237,12 +242,12 @@ Table "federation_nonce" {
 }
 
 Table "folder" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "mailbox_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "mailbox_id" bigint [not null]
   "name" varchar(255) [not null]
-  "created_at" datetime [not null, default: 'current_timestamp()']
-  "deleted_at" datetime
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamp
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -251,11 +256,11 @@ Table "folder" {
 }
 
 Table "g_attachment" {
-  "id" bigint(20) [pk, increment, not null]
-  "g_message_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "g_message_id" bigint [not null]
   "file_name" varchar(255) [not null]
   "mime_type" varchar(255) [not null]
-  "file_size" int(11) [not null]
+  "file_size" integer [not null]
   "hash_md5" varchar(255) [not null]
   "federation_id" varchar(36) [unique]
 
@@ -266,11 +271,11 @@ Table "g_attachment" {
 }
 
 Table "g_attendee" {
-  "id" bigint(20) [pk, increment, not null]
-  "g_meeting_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "g_meeting_id" bigint [not null]
   "email" varchar(255) [not null]
   "will_attend" will_attend [not null, default: 'maybe']
-  "created_at" datetime [not null, default: 'current_timestamp()']
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
 
   indexes {
     ("g_meeting_id") [name: "g_meeting_id"]
@@ -278,19 +283,19 @@ Table "g_attendee" {
 }
 
 Table "g_chat" {
-  "id" bigint(20) [pk, increment, not null]
+  "id" bigint [pk, increment, not null]
   "type" g_chat_type [not null]
   "name" varchar(255)
   "created_by_email" varchar(255) [not null]
-  "created_at" datetime [not null, default: 'current_timestamp()']
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
 }
 
 Table "g_chat_attachment" {
-  "id" bigint(20) [pk, increment, not null]
-  "g_chat_message_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "g_chat_message_id" bigint [not null]
   "file_name" varchar(255) [not null]
   "mime_type" varchar(255) [not null]
-  "file_size" int(11) [not null]
+  "file_size" integer [not null]
   "hash_md5" varchar(255) [not null]
 
   indexes {
@@ -299,15 +304,15 @@ Table "g_chat_attachment" {
 }
 
 Table "g_chat_message" {
-  "id" bigint(20) [pk, increment, not null]
-  "g_chat_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "g_chat_id" bigint [not null]
   "sender_email" varchar(255) [not null]
   "sender_name" varchar(255) [not null]
-  "body" mediumtext [not null]
-  "body_html" longtext
-  "created_at" datetime [not null, default: 'current_timestamp()']
-  "edited_at" datetime
-  "deleted_at" datetime
+  "body" text [not null]
+  "body_html" text
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "edited_at" timestamp
+  "deleted_at" timestamp
 
   indexes {
     ("g_chat_id") [name: "g_chat_id"]
@@ -315,12 +320,12 @@ Table "g_chat_message" {
 }
 
 Table "g_chat_participant" {
-  "id" bigint(20) [pk, increment, not null]
-  "g_chat_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "g_chat_id" bigint [not null]
   "email" varchar(255) [not null]
   "role" g_chat_participant_role [not null]
-  "joined_at" datetime [not null, default: 'current_timestamp()']
-  "left_at" datetime
+  "joined_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "left_at" timestamp
 
   indexes {
     ("g_chat_id") [name: "g_chat_id"]
@@ -328,11 +333,11 @@ Table "g_chat_participant" {
 }
 
 Table "g_document" {
-  "id" bigint(20) [pk, increment, not null]
-  "g_meeting_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "g_meeting_id" bigint [not null]
   "file_name" varchar(255) [not null]
   "mime_type" varchar(255) [not null]
-  "file_size" int(11) [not null]
+  "file_size" integer [not null]
   "hash_md5" varchar(255) [not null]
 
   indexes {
@@ -341,19 +346,19 @@ Table "g_document" {
 }
 
 Table "g_meeting" {
-  "id" bigint(20) [pk, increment, not null]
-  "g_schedule" bigint(20)
+  "id" bigint [pk, increment, not null]
+  "g_schedule" bigint
   "title" varchar(255) [not null]
-  "start_time" datetime [not null]
-  "end_time" datetime [not null]
+  "start_time" timestamp [not null]
+  "end_time" timestamp [not null]
   "time_zone" varchar(255) [not null]
-  "is_all_day" tinyint(1) [not null, default: 0]
+  "is_all_day" boolean [not null, default: false]
   "organizer_email" varchar(255) [not null]
   "organizer_name" varchar(255) [not null]
-  "description" mediumtext [not null]
-  "description_html" longtext
-  "created_at" datetime [default: 'current_timestamp()']
-  "sent_at" datetime
+  "description" text [not null]
+  "description_html" text
+  "created_at" timestamp [default: `CURRENT_TIMESTAMP`]
+  "sent_at" timestamp
 
   indexes {
     ("g_schedule") [name: "g_schedule"]
@@ -361,14 +366,14 @@ Table "g_meeting" {
 }
 
 Table "g_message" {
-  "id" bigint(20) [pk, increment, not null]
-  "g_thread_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "g_thread_id" bigint [not null]
   "sender_email" varchar(255) [not null]
   "sender_name" varchar(255) [not null]
-  "body" mediumtext [not null]
-  "body_html" longtext
-  "created_at" datetime [default: 'current_timestamp()']
-  "sent_at" datetime
+  "body" text [not null]
+  "body_html" text
+  "created_at" timestamp [default: `CURRENT_TIMESTAMP`]
+  "sent_at" timestamp
   "federation_id" varchar(36) [unique]
 
   indexes {
@@ -378,21 +383,21 @@ Table "g_message" {
 }
 
 Table "g_schedule" {
-  "id" bigint(20) [pk, increment, not null]
-  "start_time" datetime [not null]
-  "end_time" datetime [not null]
+  "id" bigint [pk, increment, not null]
+  "start_time" timestamp [not null]
+  "end_time" timestamp [not null]
   "time_zone" varchar(255) [not null]
-  "repeat_rule" mediumtext [not null]
-  "recurrence_dates" mediumtext [not null]
-  "exception_dates" mediumtext [not null]
+  "repeat_rule" text [not null]
+  "recurrence_dates" text [not null]
+  "exception_dates" text [not null]
   "repeat_rule_human_readable" varchar(255) [not null]
-  "created_at" datetime [default: 'current_timestamp()']
-  "sent_at" datetime
+  "created_at" timestamp [default: `CURRENT_TIMESTAMP`]
+  "sent_at" timestamp
 }
 
 Table "g_subscription" {
-  "id" bigint(20) [pk, increment, not null]
-  "g_thread_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "g_thread_id" bigint [not null]
   "email" varchar(255) [not null]
 
   indexes {
@@ -401,11 +406,11 @@ Table "g_subscription" {
 }
 
 Table "g_thread" {
-  "id" bigint(20) [pk, increment, not null]
+  "id" bigint [pk, increment, not null]
   "subject_line" varchar(255) [not null]
   "body_summary" varchar(255) [not null, default: '']
-  "created_at" datetime [not null, default: 'current_timestamp()']
-  "updated_at" datetime [default: 'current_timestamp()']
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "updated_at" timestamp [default: `CURRENT_TIMESTAMP`]
   // Stable across Domains, unlike `id`, which is a local autoincrement. This
   // is what correlates a reply arriving from a peer with the thread it
   // belongs to (ADR 17).
@@ -418,7 +423,7 @@ Table "g_thread" {
 
 Table "inbound_email" {
   "provider_id" varchar(255) [pk, not null]
-  "received_at" datetime [not null, default: 'current_timestamp()']
+  "received_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
 
   indexes {
     ("received_at") [name: "received_at"]
@@ -426,15 +431,15 @@ Table "inbound_email" {
 }
 
 Table "mailbox" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "user_id" bigint(20)
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "user_id" bigint
   "name" varchar(255) [not null]
   "color" varchar(255) [not null]
-  "default_folder_id" bigint(20)
-  "default_alias_id" bigint(20)
-  "created_at" datetime [not null, default: 'current_timestamp()']
-  "deleted_at" datetime
+  "default_folder_id" bigint
+  "default_alias_id" bigint
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamp
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -445,11 +450,11 @@ Table "mailbox" {
 }
 
 Table "meeting" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "g_meeting_id" bigint(20) [not null]
-  "mailbox_id" bigint(20) [not null]
-  "schedule_id" bigint(20)
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "g_meeting_id" bigint [not null]
+  "mailbox_id" bigint [not null]
+  "schedule_id" bigint
   "will_attend" will_attend
 
   indexes {
@@ -461,12 +466,12 @@ Table "meeting" {
 }
 
 Table "message" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "thread_id" bigint(20) [not null]
-  "g_message_id" bigint(20) [not null]
-  "read_at" datetime
-  "deleted_at" datetime
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "thread_id" bigint [not null]
+  "g_message_id" bigint [not null]
+  "read_at" timestamp
+  "deleted_at" timestamp
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -476,11 +481,11 @@ Table "message" {
 }
 
 Table "message_status" {
-  "id" bigint(20) [pk, increment, not null]
-  "g_chat_message_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "g_chat_message_id" bigint [not null]
   "recipient_email" varchar(255) [not null]
   "status" message_status_status [not null]
-  "timestamp" datetime [not null]
+  "timestamp" timestamp [not null]
 
   indexes {
     ("g_chat_message_id") [name: "g_chat_message_id"]
@@ -488,20 +493,20 @@ Table "message_status" {
 }
 
 Table "notification_preference" {
-  "id" bigint(20) [pk, increment, not null]
-  "user_id" bigint(20) [unique, not null]
+  "id" bigint [pk, increment, not null]
+  "user_id" bigint [unique, not null]
   "frequency" notification_preference_frequency [not null, default: 'daily_digest']
   "quiet_hours_start" time
   "quiet_hours_end" time
 }
 
 Table "presence_status" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "user_id" bigint(20) [unique, not null]
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "user_id" bigint [unique, not null]
   "status" presence_status_status [not null]
-  "last_activity_at" datetime [not null]
-  "updated_at" datetime [not null, default: 'current_timestamp()']
+  "last_activity_at" timestamp [not null]
+  "updated_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -509,12 +514,12 @@ Table "presence_status" {
 }
 
 Table "reminder_event" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "mailbox_id" bigint(20) [not null]
-  "g_meeting_id" bigint(20) [not null]
-  "scheduled_at" datetime [not null]
-  "sent_at" datetime
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "mailbox_id" bigint [not null]
+  "g_meeting_id" bigint [not null]
+  "scheduled_at" timestamp [not null]
+  "sent_at" timestamp
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -526,10 +531,10 @@ Table "reminder_event" {
 }
 
 Table "schedule" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "g_schedule_id" bigint(20) [not null]
-  "mailbox_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "g_schedule_id" bigint [not null]
+  "mailbox_id" bigint [not null]
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -539,8 +544,8 @@ Table "schedule" {
 }
 
 Table "sent_email" {
-  "id" int(11) [pk, increment, not null]
-  "customer_id" bigint(20)
+  "id" integer [pk, increment, not null]
+  "customer_id" bigint
   "from_name" varchar(255) [not null]
   "from_email" varchar(255) [not null]
   "to_name" varchar(255) [not null]
@@ -554,7 +559,7 @@ Table "sent_email" {
   "body" text [not null]
   "status" varchar(255) [not null]
   "status_message" varchar(255) [not null]
-  "created_at" datetime [not null]
+  "created_at" timestamp [not null]
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -563,12 +568,12 @@ Table "sent_email" {
 }
 
 Table "thread" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "folder_id" bigint(20) [not null]
-  "g_thread_id" bigint(20) [not null]
-  "read_at" datetime
-  "deleted_at" datetime
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "folder_id" bigint [not null]
+  "g_thread_id" bigint [not null]
+  "read_at" timestamp
+  "deleted_at" timestamp
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -578,15 +583,15 @@ Table "thread" {
 }
 
 Table "token" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "user_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "user_id" bigint [not null]
   "name" varchar(255) [not null]
   "value" varchar(255) [unique, not null]
-  "created_at" datetime [not null, default: 'current_timestamp()']
-  "validated_at" datetime [not null, default: 'current_timestamp()']
-  "used_at" datetime
-  "valid_until" datetime
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "validated_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "used_at" timestamp
+  "valid_until" timestamp
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -595,12 +600,12 @@ Table "token" {
 }
 
 Table "typing_indicator" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
-  "g_chat_id" bigint(20) [not null]
-  "user_id" bigint(20) [not null]
-  "started_at" datetime [not null, default: 'current_timestamp()']
-  "expires_at" datetime [not null]
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
+  "g_chat_id" bigint [not null]
+  "user_id" bigint [not null]
+  "started_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "expires_at" timestamp [not null]
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -611,14 +616,14 @@ Table "typing_indicator" {
 }
 
 Table "user" {
-  "id" bigint(20) [pk, increment, not null]
-  "customer_id" bigint(20) [not null]
+  "id" bigint [pk, increment, not null]
+  "customer_id" bigint [not null]
   "username" varchar(255) [not null]
   "password" varchar(255) [not null]
   "name" varchar(255) [not null]
-  "is_admin" int(1) [not null, default: 0]
-  "created_at" datetime [not null, default: 'current_timestamp()']
-  "modified_at" datetime [not null, default: 'current_timestamp()']
+  "is_admin" integer [not null, default: 0]
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "modified_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -672,7 +677,7 @@ Enum "presence_status_status" {
 }
 
 Ref: "alias"."mailbox_id" > "mailbox"."id" [delete: cascade]
-Ref: "alias"."customer_id" > "user"."id" [delete: cascade]
+Ref: "alias"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "attachment"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "attachment"."message_id" > "message"."id" [delete: cascade]
 Ref: "attachment"."g_attachment_id" > "g_attachment"."id" [delete: cascade]
@@ -688,7 +693,7 @@ Ref: "chat_message"."g_chat_message_id" > "g_chat_message"."id" [delete: cascade
 Ref: "contact"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "customer"."default_mailbox_id" > "mailbox"."id" [delete: "set null"]
 Ref: "domain"."customer_id" > "customer"."id" [delete: cascade]
-Ref: "folder"."customer_id" > "user"."id" [delete: cascade]
+Ref: "folder"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "folder"."mailbox_id" > "mailbox"."id" [delete: cascade]
 Ref: "g_attachment"."g_message_id" > "g_message"."id" [delete: cascade]
 Ref: "g_attendee"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
@@ -701,13 +706,13 @@ Ref: "g_message"."g_thread_id" > "g_thread"."id" [delete: cascade]
 Ref: "g_subscription"."g_thread_id" > "g_thread"."id" [delete: cascade]
 Ref: "mailbox"."default_folder_id" > "folder"."id" [delete: "set null"]
 Ref: "mailbox"."default_alias_id" > "alias"."id" [delete: "set null"]
-Ref: "mailbox"."customer_id" > "user"."id" [delete: cascade]
+Ref: "mailbox"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "mailbox"."user_id" > "user"."id" [delete: "set null"]
 Ref: "meeting"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "meeting"."mailbox_id" > "mailbox"."id" [delete: cascade]
 Ref: "meeting"."schedule_id" > "schedule"."id"
 Ref: "meeting"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
-Ref: "message"."customer_id" > "user"."id" [delete: cascade]
+Ref: "message"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "message"."thread_id" > "thread"."id" [delete: cascade]
 Ref: "message"."g_message_id" > "g_message"."id" [delete: cascade]
 Ref: "message_status"."g_chat_message_id" > "g_chat_message"."id" [delete: cascade]
@@ -721,7 +726,7 @@ Ref: "schedule"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "schedule"."mailbox_id" > "mailbox"."id" [delete: cascade]
 Ref: "schedule"."g_schedule_id" > "g_schedule"."id" [delete: cascade]
 Ref: "sent_email"."customer_id" > "customer"."id" [delete: cascade]
-Ref: "thread"."customer_id" > "user"."id" [delete: cascade]
+Ref: "thread"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "thread"."folder_id" > "folder"."id" [delete: cascade]
 Ref: "thread"."g_thread_id" > "g_thread"."id" [delete: cascade]
 Ref: "token"."user_id" > "user"."id" [delete: cascade]
@@ -729,5 +734,4 @@ Ref: "token"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "typing_indicator"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "typing_indicator"."g_chat_id" > "g_chat"."id" [delete: cascade]
 Ref: "typing_indicator"."user_id" > "user"."id" [delete: cascade]
-Ref: "user"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "user"."customer_id" > "customer"."id" [delete: cascade]
