@@ -18,6 +18,9 @@ import (
 // message to every subscriber. It returns the sender's thread projection id.
 func (s *Service) AddThread(ctx context.Context, customerID, folderID int64,
 	subscribers []string, subject, bodyHTML string, attachments []NewAttachment) (int64, error) {
+	if err := s.checkAttachments(attachments); err != nil {
+		return 0, err
+	}
 	var threadID int64
 	for i := range subscribers {
 		subscribers[i] = store.Address(subscribers[i])
@@ -85,6 +88,9 @@ func (s *Service) AddThread(ctx context.Context, customerID, folderID int64,
 // It returns the sender's message projection id.
 func (s *Service) AddMessage(ctx context.Context, customerID, threadID int64,
 	bodyHTML string, attachments []NewAttachment) (int64, error) {
+	if err := s.checkAttachments(attachments); err != nil {
+		return 0, err
+	}
 	var messageID int64
 	var onboarded []invitee
 	var sender identity
@@ -617,6 +623,10 @@ type NotMemberError struct {
 }
 
 func (e *NotMemberError) Error() string { return e.Address + " is not a member of this thread" }
+
+// Is lets the federation layer recognise the refusal without importing this
+// package, and answer a peer with not_a_member.
+func (e *NotMemberError) Is(target error) bool { return target == federation.ErrNotMember }
 
 // OnlyYourselfError refuses removing someone else from a thread: only a
 // member can leave, nobody can be removed (RFC 5.6).

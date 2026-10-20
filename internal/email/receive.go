@@ -42,7 +42,7 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 	sender := identity{Email: in.SenderEmail, Name: in.SenderName}
 
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		gThreadID, err := s.inboundThread(ctx, tx, in)
+		gThreadID, known, err := s.inboundThread(ctx, tx, in)
 		if err != nil {
 			return err
 		}
@@ -64,6 +64,14 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 		if existing != 0 {
 			refused, err = s.undelivered(ctx, tx, in.MessageFedID, mine)
 			return err
+		}
+		// A thread held here is written to only by its members. A peer that
+		// names itself a member in thread.members does not become one: who is
+		// on a thread grows only by a member adding someone (RFC 5.6).
+		if known {
+			if err := s.checkInboundMember(ctx, tx, gThreadID, in); err != nil {
+				return err
+			}
 		}
 
 		body := in.Body
@@ -307,7 +315,7 @@ func (s *Service) subscribeAll(ctx context.Context, tx *sql.Tx, gThreadID int64,
 // thread's own id if we have seen it, then in_reply_to. A peer may legitimately
 // send an in_reply_to we have never seen, in which case a fresh thread is the
 // specified behaviour rather than an error (RFC 5.3).
-func (s *Service) inboundThread(ctx context.Context, tx *sql.Tx, in federation.Inbound) (int64, error) {
+func (s *Service) inboundThread(ctx context.Context, tx *sql.Tx, in federation.Inbound) (int64, bool, error) {
 	for _, candidate := range []string{in.ThreadFedID, in.InReplyTo} {
 		if candidate == "" {
 			continue
@@ -315,19 +323,38 @@ func (s *Service) inboundThread(ctx context.Context, tx *sql.Tx, in federation.I
 		id, err := store.SelectInt(ctx, tx,
 			`SELECT "id" FROM "g_thread" WHERE "federation_id" = ? LIMIT 1`, candidate)
 		if err != nil {
-			return 0, fmt.Errorf("look up federated thread: %w", err)
+			return 0, false, fmt.Errorf("look up federated thread: %w", err)
 		}
 		if id != 0 {
-			return id, nil
+			return id, true, nil
 		}
 	}
 	id, err := store.Insert(ctx, tx,
 		`INSERT INTO "g_thread" ("subject_line", "created_at", "updated_at", "federation_id") `+
 			"VALUES (?,?,?,?)", in.Subject, in.SentAt, in.SentAt, in.ThreadFedID)
 	if err != nil {
-		return 0, fmt.Errorf("create federated thread: %w", err)
+		return 0, false, fmt.Errorf("create federated thread: %w", err)
 	}
-	return id, nil
+	return id, false, nil
+}
+
+// checkInboundMember refuses a message on a thread held here from someone who
+// is not a member of it. A Domain's mailer-daemon, which tells the thread
+// about refusals, is never a member and is let through.
+func (s *Service) checkInboundMember(ctx context.Context, tx *sql.Tx, gThreadID int64, in federation.Inbound) error {
+	if federation.IsMailerDaemon(in.SenderEmail) {
+		return nil
+	}
+	n, err := store.SelectInt(ctx, tx,
+		`SELECT COUNT(*) FROM "g_subscription" WHERE "g_thread_id" = ? AND "email" = ? AND `+isMember,
+		gThreadID, in.SenderEmail)
+	if err != nil {
+		return fmt.Errorf("look up sender membership: %w", err)
+	}
+	if n == 0 {
+		return &NotMemberError{Address: in.SenderEmail}
+	}
+	return nil
 }
 
 // projectInbound writes one recipient's view of a federated message. It reports

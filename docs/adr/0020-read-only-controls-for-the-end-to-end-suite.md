@@ -20,6 +20,12 @@ its own, set by `WEBMAIL_CONTROL_ADDR`:
 - `GET /control/envelopes` lists the federation outbox: peer, recipients,
   status, attempts and times for each envelope, and never the message itself.
 - `GET /control/accounts` lists each user with every address that reaches it.
+- `GET /control/peers` lists each pinned peer descriptor: the keys it holds
+  and the URL it was fetched from.
+- `GET /control/files?md5=` lists how often the bytes with that MD5 are stored
+  and how many attachments refer to them, never the bytes or the file names.
+- `GET /control/threads?member=` lists the federated threads an address is on,
+  with their federation id and members, never the subject or content.
 
 It is off unless the variable is set, and it is never routed through the
 public handler, so no Federation hostname can serve it. It has no
@@ -34,4 +40,7 @@ stack sets it and publishes it on each Domain's own loopback address, port
 - A production deployment must not set `WEBMAIL_CONTROL_ADDR`, or must keep
   that port private. The server logs a warning when it is set.
 - The surface only reads. Controls that change state, such as taking a Domain
-  down or moving its clock, stay in the test stack, not in the server.
+  down or moving its clock, stay in the test stack, not in the server. The
+  stack has two: a Domain's federation config can be swapped for a story
+  (`FEDERATION_CONFIG_<DOMAIN>`), and federation traffic passes through a fault
+  proxy that a story can arm (`deploy/faults`).

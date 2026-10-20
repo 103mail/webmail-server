@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -191,6 +192,11 @@ func (s *Service) Receive(ctx context.Context, req *Request) (*Accepted, *Reject
 	}
 
 	delivered, refused, err := s.deliverer.DeliverInbound(ctx, *inbound)
+	if errors.Is(err, ErrNotMember) {
+		// Not recorded as accepted, so an Origin whose invitation was only
+		// late is let in on a retry (RFC 5.6, 6.3).
+		return nil, reject(http.StatusTooEarly, ErrNotAMember, err.Error())
+	}
 	if err != nil {
 		// A local failure is transient from the peer's point of view: it should
 		// retry, and the dedup row is deliberately not written.
@@ -357,6 +363,15 @@ func (s *Service) LocalRecipients(addresses []string) []string {
 		}
 	}
 	return local
+}
+
+// MaxAttachmentBytes is the attachment cap this Domain advertises, and the
+// largest file its own people may attach.
+func (s *Service) MaxAttachmentBytes() int64 {
+	if s.cfg == nil || s.cfg.MaxAttachmentBytes <= 0 {
+		return DefaultMaxAttachmentBytes
+	}
+	return s.cfg.MaxAttachmentBytes
 }
 
 // MaxEnvelopeBytes is the cap this Domain advertises and enforces.

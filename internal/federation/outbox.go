@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -245,11 +246,19 @@ func (s *Service) attempt(ctx context.Context, row outboxRow) {
 		}
 
 	case isPermanent(status):
-		detail := fmt.Sprintf("peer answered %d", status)
-		if err != nil {
-			detail = err.Error()
+		// The bounce names the error code the peer answered with, or the one
+		// we refused the send with ourselves (RFC 6.5).
+		code := fmt.Sprintf("peer answered %d", status)
+		var answer *Rejection
+		if errors.As(err, &answer) && answer.Code != "" {
+			code = answer.Code
+		} else if err != nil {
+			code = err.Error()
 		}
-		s.fail(ctx, row, status, detail)
+		if err != nil {
+			s.log.Warn("envelope refused", "peer", row.PeerDomain, "envelope", row.EnvelopeID, "error", err)
+		}
+		s.fail(ctx, row, status, code)
 
 	case s.db.Now().Sub(row.CreatedAt) >= s.cfg.RetryBudget:
 		// The 72-hour budget is a hard stop; retrying past it is forbidden and
@@ -282,11 +291,18 @@ func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, 
 	if !peer.Speaks(Version) {
 		// Permanent: the peer has told us it does not speak our version, and
 		// no amount of retrying changes that.
-		return http.StatusBadRequest, 0, nil, fmt.Errorf("peer %s does not speak %s", row.PeerDomain, Version)
+		return http.StatusBadRequest, 0, nil, reject(http.StatusBadRequest, ErrUnsupportedVersion,
+			fmt.Sprintf("peer %s does not speak %s", row.PeerDomain, Version))
 	}
+	// Both caps are the peer's, and sending past either is forbidden, so a
+	// message that does not fit is refused here as the peer would (RFC 7).
 	if int64(len(row.Body)) > peer.EnvelopeCap() {
-		return http.StatusRequestEntityTooLarge, 0, nil, fmt.Errorf(
-			"envelope is %d bytes, peer %s accepts %d", len(row.Body), row.PeerDomain, peer.EnvelopeCap())
+		return http.StatusRequestEntityTooLarge, 0, nil, reject(http.StatusRequestEntityTooLarge, ErrTooLarge,
+			fmt.Sprintf("envelope is %d bytes, peer %s accepts %d", len(row.Body), row.PeerDomain, peer.EnvelopeCap()))
+	}
+	if size := largestAttachment(row.Body); size > peer.AttachmentCap() {
+		return http.StatusRequestEntityTooLarge, 0, nil, reject(http.StatusRequestEntityTooLarge, ErrTooLarge,
+			fmt.Sprintf("an attachment is %d bytes, peer %s accepts %d", size, row.PeerDomain, peer.AttachmentCap()))
 	}
 
 	nonce, err := NewNonce()
@@ -336,8 +352,38 @@ func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, 
 	if len(detail) > 4096 {
 		detail = detail[:4096]
 	}
-	return resp.StatusCode, retryAfterOf(resp), nil, fmt.Errorf("peer %s answered %d: %s",
-		row.PeerDomain, resp.StatusCode, strings.TrimSpace(detail))
+	return resp.StatusCode, retryAfterOf(resp), nil, answerOf(resp.StatusCode, row.PeerDomain, detail)
+}
+
+// answerOf reads a peer's error answer into a Rejection, so that the code it
+// gave reaches the sender's bounce (RFC 6.3, 6.5). A body that is not the
+// RFC's {"error": ...} keeps only the status.
+func answerOf(status int, peer, body string) *Rejection {
+	var answer struct {
+		Error  string `json:"error"`
+		Detail string `json:"detail"`
+	}
+	_ = json.Unmarshal([]byte(body), &answer)
+	detail := fmt.Sprintf("peer %s answered %d: %s", peer, status, strings.TrimSpace(body))
+	return reject(status, answer.Error, detail)
+}
+
+// largestAttachment is the decoded size of the biggest attachment an
+// envelope declares. Only the sizes are read; the envelope is our own.
+func largestAttachment(body []byte) int64 {
+	var envelope struct {
+		Attachments []struct {
+			FileSize int64 `json:"file_size"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return 0
+	}
+	var largest int64
+	for _, a := range envelope.Attachments {
+		largest = max(largest, a.FileSize)
+	}
+	return largest
 }
 
 // refusalsIn reads the refused recipients out of a 202 body. A body without

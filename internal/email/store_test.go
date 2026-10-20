@@ -1112,3 +1112,69 @@ func TestATimedOutBounceSaysItWillBeResent(t *testing.T) {
 		t.Errorf("the bounce reads %q", messages[0].Body)
 	}
 }
+
+// A peer cannot write into a thread held here for someone who is not on it,
+// even by listing them in thread.members; a member of the thread still can
+// (RFC 5.6).
+func TestIncomingMailFromANonMemberIsRefused(t *testing.T) {
+	f := newFixture(t)
+	bob, _, bobInbox := f.account("bob@example.test", "Bob")
+	thread := "0192f0c0-0000-7000-8000-000000000001"
+	if _, _, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: thread, Subject: "Acquisition",
+		MessageFedID: "0192f0c0-0000-7000-8000-000000000002", SenderEmail: "pete@peer.test",
+		Body: "Kick-off", SentAt: f.now, Recipients: []string{"bob@example.test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: thread, Subject: "Acquisition",
+		MessageFedID: "0192f0c0-0000-7000-8000-000000000003", SenderEmail: "mallory@peer.test",
+		Body: "Let me in", SentAt: f.now, Recipients: []string{"bob@example.test"},
+		Members: []string{"pete@peer.test", "bob@example.test", "mallory@peer.test"},
+	})
+	if !errors.Is(err, federation.ErrNotMember) {
+		t.Fatalf("DeliverInbound from a non-member = %v, want ErrNotMember", err)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "g_subscription" WHERE "email" = 'mallory@peer.test'`); n != 0 {
+		t.Error("the non-member was made a member")
+	}
+
+	delivered, _, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: thread, Subject: "Acquisition",
+		MessageFedID: "0192f0c0-0000-7000-8000-000000000004", SenderEmail: "pete@peer.test",
+		Body: "Numbers tomorrow", SentAt: f.now, Recipients: []string{"bob@example.test"},
+	})
+	if err != nil || delivered != 1 {
+		t.Fatalf("DeliverInbound from a member = %d, %v", delivered, err)
+	}
+	threads, _ := f.svc.ListThreads(f.ctx, bob, bobInbox, "")
+	if len(threads) != 1 {
+		t.Fatalf("Bob has %d threads, want 1", len(threads))
+	}
+	messages, _ := f.svc.ListMessages(f.ctx, bob, threads[0].ThreadID, "")
+	if len(messages) != 2 {
+		t.Errorf("Bob has %d messages, want the two from Pete", len(messages))
+	}
+}
+
+// A file over the Domain's attachment limit is refused before anything is
+// written, naming the file and the limit (RFC 7).
+func TestAttachmentsOverTheLimitAreRefused(t *testing.T) {
+	f := newFixture(t)
+	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
+	f.account("bob@example.test", "Bob")
+	raw := NewAttachment{FileName: "raw.mov", MimeType: "video/quicktime",
+		FileData: make([]byte, federation.DefaultMaxAttachmentBytes+1)}
+
+	_, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"bob@example.test"}, "Video", "<p>x</p>",
+		[]NewAttachment{raw})
+	var tooLarge *TooLargeError
+	if !errors.As(err, &tooLarge) || err.Error() != "raw.mov is larger than the 25 MB limit" {
+		t.Fatalf("AddThread = %v, want raw.mov refused as larger than 25 MB", err)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "g_message"`); n != 0 {
+		t.Errorf("%d messages were written", n)
+	}
+}

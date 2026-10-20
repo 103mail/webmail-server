@@ -16,6 +16,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -71,8 +72,14 @@ type LocalDomain struct {
 	// because peers pin keys per DNS domain and one Domain's compromise must
 	// not let an attacker speak for the others co-hosted with it (RFC 4.1).
 	PrivateKeyFile string `json:"privateKeyFile"`
+	// PreviousKeyFiles are the keys this Domain signed with before its last
+	// rotation. Only their public halves are used: they are published as
+	// previous_public_keys so peers that pinned an old key keep trusting us,
+	// and must be removed within 48 hours of the rotation (RFC 9.5).
+	PreviousKeyFiles []string `json:"previousKeyFiles"`
 
-	key ed25519.PrivateKey
+	key      ed25519.PrivateKey
+	previous []ed25519.PublicKey
 }
 
 // Config is the federation configuration, read from a JSON file so that a
@@ -153,6 +160,17 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("domain %s: %w", d.Domain, err)
 		}
 		d.key = key
+		if len(d.PreviousKeyFiles) > maxPreviousKeys {
+			return nil, fmt.Errorf("domain %s lists %d previous keys, at most %d may be published",
+				d.Domain, len(d.PreviousKeyFiles), maxPreviousKeys)
+		}
+		for _, file := range d.PreviousKeyFiles {
+			old, err := LoadPrivateKey(file)
+			if err != nil {
+				return nil, fmt.Errorf("domain %s previous key: %w", d.Domain, err)
+			}
+			d.previous = append(d.previous, old.Public().(ed25519.PublicKey))
+		}
 	}
 	return &cfg, nil
 }
@@ -182,6 +200,10 @@ func checkDomainName(name string) error {
 	}
 	return nil
 }
+
+// ErrNotMember is what a Deliverer's error matches when the sender is not a
+// member of a thread the Destination already holds.
+var ErrNotMember = errors.New("the sender is not a member of the thread")
 
 // Deliverer writes an accepted envelope into the mail domain. Declared here and
 // satisfied by *email.Service, so this package never imports that one.
@@ -418,12 +440,21 @@ func (s *Service) DescriptorFor(domain string) (*Descriptor, bool) {
 	return &Descriptor{
 		Domain:             d.Domain,
 		PublicKey:          EncodePublicKey(d.key.Public().(ed25519.PublicKey)),
-		PreviousPublicKeys: []string{},
+		PreviousPublicKeys: d.previousPublicKeys(),
 		Versions:           []string{Version},
 		Registrar:          false,
 		MaxEnvelopeBytes:   s.cfg.MaxEnvelopeBytes,
 		MaxAttachmentBytes: s.cfg.MaxAttachmentBytes,
 	}, true
+}
+
+// previousPublicKeys renders the keys this Domain rotated away from.
+func (d *LocalDomain) previousPublicKeys() []string {
+	out := []string{}
+	for _, key := range d.previous {
+		out = append(out, EncodePublicKey(key))
+	}
+	return out
 }
 
 // OriginFor picks the local Domain an address sends as. An address on a Domain
@@ -584,4 +615,44 @@ func splitList(v string) []string {
 		}
 	}
 	return out
+}
+
+// PinnedPeer is one peer as this Server trusts it: the keys it pinned and
+// where it fetched them from. For the read-only controls (ADR 20).
+type PinnedPeer struct {
+	Domain             string     `json:"domain"`
+	DescriptorURL      string     `json:"descriptorUrl"`
+	PublicKey          string     `json:"publicKey"`
+	PreviousPublicKeys []string   `json:"previousPublicKeys"`
+	DiscoveredAt       *time.Time `json:"discoveredAt"`
+}
+
+// Peers lists every peer whose descriptor is pinned, by domain.
+func (s *Service) Peers(ctx context.Context) ([]PinnedPeer, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT "name", "public_key", "previous_public_keys", "discovered_at" FROM "domain" `+
+			`WHERE "is_local" = FALSE AND "public_key" IS NOT NULL AND "public_key" <> '' ORDER BY "name"`)
+	if err != nil {
+		return nil, fmt.Errorf("list peers: %w", err)
+	}
+	defer rows.Close()
+	peers := []PinnedPeer{}
+	for rows.Next() {
+		var p PinnedPeer
+		var previous string
+		var discovered sql.NullTime
+		if err := rows.Scan(&p.Domain, &p.PublicKey, &previous, &discovered); err != nil {
+			return nil, fmt.Errorf("scan peer: %w", err)
+		}
+		p.DescriptorURL = BaseURL(p.Domain) + WellKnownPath
+		p.PreviousPublicKeys = splitList(previous)
+		if p.PreviousPublicKeys == nil {
+			p.PreviousPublicKeys = []string{}
+		}
+		if discovered.Valid {
+			p.DiscoveredAt = &discovered.Time
+		}
+		peers = append(peers, p)
+	}
+	return peers, rows.Err()
 }

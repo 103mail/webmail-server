@@ -303,6 +303,10 @@ func (s *Server) result(w http.ResponseWriter, r *http.Request, value any, err e
 	if errors.As(err, &notMember) {
 		return map[string]any{"error": "not_a_member", "detail": err.Error()}, http.StatusForbidden
 	}
+	var tooLarge *email.TooLargeError
+	if errors.As(err, &tooLarge) {
+		return map[string]any{"error": "too_large", "detail": err.Error()}, http.StatusRequestEntityTooLarge
+	}
 	var notYours *email.OnlyYourselfError
 	if errors.As(err, &notYours) {
 		return map[string]any{"error": "only_yourself", "detail": err.Error()}, http.StatusForbidden

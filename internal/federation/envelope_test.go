@@ -353,3 +353,15 @@ func TestUUIDsSortByTime(t *testing.T) {
 		t.Errorf("%q should sort before %q", first, second)
 	}
 }
+
+// A peer's refusal reaches the bounce as the code it answered with, and an
+// answer that is not the RFC's shape keeps only its status (RFC 6.3, 6.5).
+func TestAnswerOfReadsTheWireCode(t *testing.T) {
+	r := answerOf(403, "peer.test", `{"error":"peer_not_allowed"}`)
+	if r.Status != 403 || r.Code != ErrPeerNotAllowed {
+		t.Errorf("answerOf = %+v, want 403 peer_not_allowed", r)
+	}
+	if r := answerOf(502, "peer.test", "<html>Bad Gateway</html>"); r.Status != 502 || r.Code != "" {
+		t.Errorf("answerOf(html) = %+v, want 502 with no code", r)
+	}
+}

@@ -2,6 +2,12 @@ package federation
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -149,5 +155,59 @@ func TestParseHTTPDateRejectsRubbish(t *testing.T) {
 		if _, err := ParseHTTPDate(v); err == nil {
 			t.Errorf("ParseHTTPDate(%q) accepted", v)
 		}
+	}
+}
+
+// writeKey stores a new Ed25519 key as PKCS#8 PEM, the way openssl writes it.
+func writeKey(t *testing.T, path string) ed25519.PrivateKey {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+// A Domain that rotated signs with its new key and publishes the old one as a
+// previous key, so peers that pinned it keep trusting us (RFC 9.5).
+func TestRotatedKeysArePublishedAsPrevious(t *testing.T) {
+	dir := t.TempDir()
+	current := writeKey(t, filepath.Join(dir, "new.pem"))
+	old := writeKey(t, filepath.Join(dir, "old.pem"))
+	config := filepath.Join(dir, "federation.json")
+	if err := os.WriteFile(config, []byte(`{"domains":[{"domain":"example.test",`+
+		`"privateKeyFile":"`+filepath.Join(dir, "new.pem")+`",`+
+		`"previousKeyFiles":["`+filepath.Join(dir, "old.pem")+`"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WEBMAIL_FEDERATION_CONFIG", config)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(nil, cfg, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, ok := s.DescriptorFor("example.test")
+	if !ok {
+		t.Fatal("no descriptor for example.test")
+	}
+	if d.PublicKey != EncodePublicKey(current.Public().(ed25519.PublicKey)) {
+		t.Error("the descriptor does not carry the new key")
+	}
+	want := []string{EncodePublicKey(old.Public().(ed25519.PublicKey))}
+	if !slices.Equal(d.PreviousPublicKeys, want) {
+		t.Errorf("previous_public_keys = %v, want the old key", d.PreviousPublicKeys)
+	}
+	if err := d.Validate("example.test"); err != nil {
+		t.Errorf("the descriptor does not validate: %v", err)
 	}
 }

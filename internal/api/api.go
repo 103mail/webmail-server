@@ -111,6 +111,12 @@ func (s *Server) route(h handlerFunc) http.HandlerFunc {
 		}
 
 		data, err := s.parseBody(r)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			s.respond(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "too_large",
+				"detail": fmt.Sprintf("the request is larger than the %d MB limit", tooLarge.Limit>>20)})
+			return
+		}
 		if err != nil {
 			s.respond(w, http.StatusBadRequest, nil)
 			return

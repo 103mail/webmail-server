@@ -150,3 +150,16 @@ func TestComposeToUnknownLocalAddressIsRefused(t *testing.T) {
 		t.Errorf("body = %+v", body)
 	}
 }
+
+// A request over the body limit is answered 413 too_large with the limit, so
+// the sender is told why, rather than a bare 400.
+func TestOversizedRequestsAreTooLarge(t *testing.T) {
+	a := newAPIStack(t)
+	_, folderID := a.account("alice@example.test", "Alice")
+	big := strings.Repeat("x", 2<<20)
+	status, code := a.call("alice@example.test", http.MethodPost, "/api/v1/email/thread/"+strconv.FormatInt(folderID, 10),
+		`{"subject":"Video","subscribers":[],"body":"`+big+`"}`)
+	if status != http.StatusRequestEntityTooLarge || code != "too_large" {
+		t.Errorf("answered %d %q, want 413 too_large", status, code)
+	}
+}

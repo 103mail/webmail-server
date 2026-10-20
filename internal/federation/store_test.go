@@ -459,3 +459,71 @@ func TestRetriesStopAtTheBudget(t *testing.T) {
 		t.Errorf("status %q, %v; want owed without another attempt", status, err)
 	}
 }
+
+// An attachment larger than the peer accepts is not sent: the sender is
+// bounced with too_large, as the peer would have answered (RFC 7, 6.5).
+func TestAttachmentsOverThePeerCapAreBouncedTooLarge(t *testing.T) {
+	db := storetest.Open(t)
+	ctx := context.Background()
+	s := newStoreService(t, db)
+	d := &recordingDeliverer{}
+	s.Attach(d)
+	_, peerKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.storePeer(ctx, &Descriptor{Domain: "peer.test", Versions: []string{Version},
+		PublicKey:        EncodePublicKey(peerKey.Public().(ed25519.PublicKey)),
+		MaxEnvelopeBytes: 1 << 20, MaxAttachmentBytes: 8}); err != nil {
+		t.Fatal(err)
+	}
+	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
+		return s.Enqueue(ctx, tx, Outbound{
+			PeerDomain: "peer.test", OriginDomain: "example.test",
+			ThreadFedID: "0192f0c0-0000-7000-8000-000000000001", Subject: "Scan",
+			MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
+			SenderEmail:  "alice@example.test", SentAt: s.db.Now(), Recipients: []string{"bob@peer.test"},
+			Attachments: []OutboundAttachment{{FederationID: "0192f0c0-0000-7000-8000-000000000003",
+				FileName: "scan.pdf", MimeType: "application/pdf", Data: []byte("nine bytes")}},
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.claim(ctx, "peer.test", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("claim = %d, %v", len(rows), err)
+	}
+	s.attempt(ctx, rows[0])
+	if len(d.bounces) != 1 || d.bounces[0].ErrorCode != ErrTooLarge || d.bounces[0].HTTPStatus != 413 {
+		t.Fatalf("bounces = %+v, want one too_large", d.bounces)
+	}
+	if n, _ := store.SelectInt(ctx, db,
+		`SELECT COUNT(*) FROM "federation_outbox" WHERE "status" = 'permanent_failure'`); n != 1 {
+		t.Errorf("the envelope is not retired as a permanent failure")
+	}
+}
+
+// The peers control lists each pinned key and where it was fetched from.
+func TestPeersListsPinnedKeys(t *testing.T) {
+	db := storetest.Open(t)
+	ctx := context.Background()
+	s := newStoreService(t, db)
+	if err := s.RegisterLocalDomains(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.recordDiscoveryFailure(ctx, "down.test")
+	if err := s.storePeer(ctx, &Descriptor{Domain: "mail.peer.test", PublicKey: "k1",
+		PreviousPublicKeys: []string{"k0"}, Versions: []string{Version}}); err != nil {
+		t.Fatal(err)
+	}
+	peers, err := s.Peers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].Domain != "mail.peer.test" || peers[0].PublicKey != "k1" ||
+		peers[0].DescriptorURL != "https://webmail.mail.peer.test/.well-known/webmail-federation" ||
+		len(peers[0].PreviousPublicKeys) != 1 {
+		t.Errorf("peers = %+v, want only mail.peer.test with its keys", peers)
+	}
+}

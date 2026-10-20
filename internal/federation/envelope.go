@@ -109,6 +109,10 @@ const (
 	ErrServerError         = "server_error"
 	ErrMalformedEnvelope   = "malformed_envelope"
 	ErrUnknownOriginDomain = "unknown_origin_domain"
+	// ErrNotAMember answers a message on a thread the Destination holds from
+	// someone who is not a member of it. It is transient (425), because an
+	// invitation may still be on its way (RFC 5.6, 6.3).
+	ErrNotAMember = "not_a_member"
 )
 
 // Rejection is a protocol-level refusal: an HTTP status and the wire error code

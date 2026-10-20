@@ -12,6 +12,8 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"os"
+	"strings"
 	"time"
 
 	crand "crypto/rand"
@@ -49,6 +51,9 @@ type Federator interface {
 	OriginFor(senderEmail string) (*federation.LocalDomain, bool)
 	// Enqueue writes an envelope to the outbox in the caller's transaction.
 	Enqueue(ctx context.Context, tx *sql.Tx, out federation.Outbound) error
+	// MaxAttachmentBytes is the largest attachment the Domain accepts, which
+	// is also the largest its own people may send (RFC 4.2, 7).
+	MaxAttachmentBytes() int64
 }
 
 // Service implements the mail domain against a database and a blob store.
@@ -73,6 +78,38 @@ func New(db *store.DB, attachments *blob.Store, notifier Notifier, federator Fed
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Service{db: db, blob: attachments, notifier: notifier, federation: federator, log: log}
+}
+
+// maxAttachmentBytes is the largest file a message may carry: the Domain's
+// advertised cap, or the RFC's default without federation.
+func (s *Service) maxAttachmentBytes() int64 {
+	if s.federation == nil {
+		return federation.DefaultMaxAttachmentBytes
+	}
+	return s.federation.MaxAttachmentBytes()
+}
+
+// checkAttachments refuses a message with a file over the limit before
+// anything is written. A peer would refuse it anyway, and a message that
+// reaches some members but not others is worse than one that is refused.
+func (s *Service) checkAttachments(attachments []NewAttachment) error {
+	limit := s.maxAttachmentBytes()
+	for _, a := range attachments {
+		if int64(len(a.FileData)) > limit {
+			return &TooLargeError{FileName: a.FileName, Limit: limit}
+		}
+	}
+	return nil
+}
+
+// TooLargeError refuses an attachment over the Domain's limit.
+type TooLargeError struct {
+	FileName string
+	Limit    int64
+}
+
+func (e *TooLargeError) Error() string {
+	return fmt.Sprintf("%s is larger than the %d MB limit", e.FileName, e.Limit>>20)
 }
 
 // isLocal reports whether an address is delivered on this Server.
@@ -1153,4 +1190,67 @@ func (s *Service) DeleteMailbox(ctx context.Context, customerID, mailboxID int64
 		return nil
 	})
 	return err == nil, err
+}
+
+// StoredFile is one attachment's bytes as this Server holds them: how many
+// attachments refer to them and whether they are on disk. For the read-only
+// controls (ADR 20); it carries no content and no file names.
+type StoredFile struct {
+	HashMD5     string `json:"hashMd5"`
+	FileSize    int64  `json:"fileSize"`
+	Attachments int64  `json:"attachments"`
+	Stored      bool   `json:"stored"`
+}
+
+// StoredFiles lists the stored bytes whose MD5 is hashMD5. The blob store is
+// addressed by content, so the same bytes attached twice are one file.
+func (s *Service) StoredFiles(ctx context.Context, hashMD5 string) ([]StoredFile, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT "hash_md5", MAX("file_size"), COUNT(*) FROM "g_attachment" WHERE "hash_md5" = ? `+
+			`GROUP BY "hash_md5"`, strings.ToLower(hashMD5))
+	if err != nil {
+		return nil, fmt.Errorf("list stored files: %w", err)
+	}
+	defer rows.Close()
+	files := []StoredFile{}
+	for rows.Next() {
+		var f StoredFile
+		if err := rows.Scan(&f.HashMD5, &f.FileSize, &f.Attachments); err != nil {
+			return nil, fmt.Errorf("scan stored file: %w", err)
+		}
+		_, statErr := os.Stat(s.blob.Path(f.HashMD5))
+		f.Stored = statErr == nil
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
+// ThreadMembers is a thread's federated identity and who is on it. For the
+// read-only controls (ADR 20); it carries no subject and no content.
+type ThreadMembers struct {
+	FederationID string   `json:"federationId"`
+	Members      []string `json:"members"`
+}
+
+// ThreadsOf lists the federated threads an address is a member of.
+func (s *Service) ThreadsOf(ctx context.Context, address string) ([]ThreadMembers, error) {
+	ids, err := store.SelectStrings(ctx, s.db,
+		`SELECT "g_thread"."federation_id" FROM "g_thread" `+
+			`JOIN "g_subscription" ON "g_subscription"."g_thread_id" = "g_thread"."id" `+
+			`WHERE "g_subscription"."email" = ? AND "g_thread"."federation_id" IS NOT NULL `+
+			`ORDER BY "g_thread"."id"`, store.Address(address))
+	if err != nil {
+		return nil, fmt.Errorf("list threads of %s: %w", address, err)
+	}
+	out := []ThreadMembers{}
+	for _, id := range ids {
+		members, err := store.SelectStrings(ctx, s.db,
+			`SELECT "email" FROM "g_subscription" JOIN "g_thread" ON "g_thread"."id" = "g_subscription"."g_thread_id" `+
+				`WHERE "g_thread"."federation_id" = ? AND `+isMember+` ORDER BY "email"`, id)
+		if err != nil {
+			return nil, fmt.Errorf("list members of %s: %w", id, err)
+		}
+		out = append(out, ThreadMembers{FederationID: id, Members: members})
+	}
+	return out, nil
 }
