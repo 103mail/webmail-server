@@ -1,4 +1,4 @@
-# Three independent Domains on one machine, laid out the way the federation
+# Four independent Domains on one machine, laid out the way the federation
 # design describes: each Domain is its own Server (process + database) and
 # serves its whole webmail surface under the single hostname
 # `webmail.{domain}` (RFC 1.3 "Federation hostname", design 1).
@@ -11,8 +11,9 @@
 #           descriptor, terminates TLS, and proxies /api/v1/ to api-*. The
 #           bundle and the API therefore share an origin, as design 2 requires.
 #   ws-*    ws2api (profile `chat-ws`, off by default). See deploy/README.md.
-#           mail.acme.test has none: chat does not federate, and the Domain
-#           exists for the end-to-end stories, which do not use it.
+#           mail.acme.test and acme.test have none: chat does not federate,
+#           and those Domains exist for the end-to-end stories, which do not
+#           use it.
 #
 # Networks:
 #   dom-*        private per Domain. api is not reachable across it.
@@ -294,6 +295,72 @@ services:
       dom-acme:
       federation:
 
+  # ── acme.test ──────────────────────────────────────────────────────────────
+  # The parent domain of mail.acme.test, and a separate Domain: its own key,
+  # database and hostname. A parent and its subdomain share nothing on the
+  # wire (RFC 4.1.1). The services are called "parent" because "acme" is
+  # mail.acme.test.
+  api-parent:
+    <<: *api
+    environment:
+      <<: *api-env
+      WEBMAIL_ALLOWED_ORIGINS: https://webmail.acme.test
+      WEBMAIL_SNS_TOPIC_ARN: arn:aws:sns:eu-west-1:000000000000:acme-test
+      WEBMAIL_CONTROL_ADDR: ":8081"
+      WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
+    # The read-only end-to-end test controls (ADR 20), on this Domain's own
+    # loopback address like its web container.
+    ports:
+      - "127.0.0.4:8081:8081"
+    volumes:
+      - ./data/acme.test:/data
+      - ./domain/acme.test/federation.json:/etc/webmail/federation.json:ro
+      - ./keys:/etc/webmail/keys:ro
+      - ./certs:/etc/webmail/certs:ro
+    networks:
+      dom-parent:
+        aliases: [api]
+      federation:
+
+  web-parent:
+    <<: *web
+    environment:
+      WEBMAIL_DOMAIN: acme.test
+    volumes:
+      - ./nginx/webmail.conf.template:/etc/nginx/templates/webmail.conf.template:ro
+      - ./domain/acme.test:/etc/nginx/domain:ro
+      - ./certs:/etc/nginx/certs:ro
+    ports:
+      - "127.0.0.4:443:443"
+      - "127.0.0.4:80:80"
+    depends_on:
+      api-parent:
+        condition: service_healthy
+    networks:
+      dom-parent:
+      federation:
+        aliases: [webmail.acme.test]
+
+  worker-parent:
+    <<: *api
+    entrypoint: ["webmail-worker"]
+    environment:
+      <<: *api-env
+      WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
+    volumes:
+      - ./data/acme.test:/data
+      - ./domain/acme.test/federation.json:/etc/webmail/federation.json:ro
+      - ./keys:/etc/webmail/keys:ro
+      - ./certs:/etc/webmail/certs:ro
+    healthcheck:
+      disable: true
+    depends_on:
+      api-parent:
+        condition: service_healthy
+    networks:
+      dom-parent:
+      federation:
+
   # ── Shared ─────────────────────────────────────────────────────────────────
   # Stands in for SNS for every Domain, so notification email is captured
   # rather than sent. The end-to-end stories read it at
@@ -317,6 +384,8 @@ networks:
   dom-example:
     internal: true
   dom-acme:
+    internal: true
+  dom-parent:
     internal: true
   federation:
 

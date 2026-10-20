@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-DOMAINS=(103mail.com example.com mail.acme.test)
+DOMAINS=(103mail.com example.com mail.acme.test acme.test)
 CERTS=certs
 CA_KEY="$CERTS/webmail-local-ca.key"
 CA_CRT="$CERTS/webmail-local-ca.crt"
@@ -150,6 +150,14 @@ if [[ ! -s seed/mail.acme.test.sqlite.sql ]] || $RESEED; then
         > seed/mail.acme.test.sqlite.sql
 fi
 
+# The parent of mail.acme.test, and a Domain of its own: a parent and its
+# subdomain share nothing on the wire (RFC 4.1.1).
+if [[ ! -s seed/acme.test.sqlite.sql ]] || $RESEED; then
+    echo "writing seed/acme.test.sqlite.sql"
+    ./seed.sh acme.test "pete@acme.test" "Pete Smit" "pete@acme.test" \
+        > seed/acme.test.sqlite.sql
+fi
+
 # ── Databases ───────────────────────────────────────────────────────────────
 # One SQLite file per Domain, in the directory that Domain's API and worker
 # both mount as /data. Built once from the schema and the seed, with every
@@ -178,5 +186,6 @@ echo "  1. add to /etc/hosts:"
 echo "       127.0.0.1  webmail.103mail.com"
 echo "       127.0.0.2  webmail.example.com"
 echo "       127.0.0.3  webmail.mail.acme.test"
+echo "       127.0.0.4  webmail.acme.test"
 echo "  2. trust $PWD/$CA_CRT in your browser"
 echo "  3. docker compose up -d --build"

@@ -33,7 +33,7 @@ compose builds them by relative path.
 `setup.sh` is idempotent and generates the things that cannot be checked in:
 
 - a local CA, plus a leaf certificate for `webmail.103mail.com`,
-  `webmail.example.com` and `webmail.mail.acme.test`
+  `webmail.example.com`, `webmail.mail.acme.test` and `webmail.acme.test`
 - an Ed25519 federation keypair per Domain, and the `federation.json` that
   names it
 - the seed SQL for every Domain
@@ -52,6 +52,7 @@ Then, once per machine:
        127.0.0.1  webmail.103mail.com
        127.0.0.2  webmail.example.com
        127.0.0.3  webmail.mail.acme.test
+       127.0.0.4  webmail.acme.test
 
 2. Trust `deploy/certs/webmail-local-ca.crt` in the browser. Chrome: Settings,
    Privacy and security, Security, Manage certificates, Authorities, Import.
@@ -63,7 +64,7 @@ Then, once per machine:
 
        docker compose up -d --build
 
-Twelve containers should come up: an API, a worker and an nginx per Domain,
+Fifteen containers should come up: an API, a worker and an nginx per Domain,
 a chat proxy for 103mail.com and example.com, and the mail sink. There is no database container; each Domain's database is the file
 `deploy/data/{domain}/webmail.db`, which `setup.sh` built. `docker compose ps` shows them.
 
