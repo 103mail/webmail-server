@@ -323,6 +323,10 @@ func (s *Service) Bounce(ctx context.Context, b federation.BounceNotice) error {
 
 	senderEmail := store.Address(b.SenderEmail)
 	now := s.db.Now()
+	bounceFedID, err := federation.NewUUID()
+	if err != nil {
+		return err
+	}
 	return s.db.Tx(ctx, func(tx *sql.Tx) error {
 		mailboxID, err := store.SelectInt(ctx, tx,
 			`SELECT "mailbox_id" FROM "alias" WHERE "email" = ? LIMIT 1`, senderEmail)
@@ -354,8 +358,8 @@ func (s *Service) Bounce(ctx context.Context, b federation.BounceNotice) error {
 		}
 		gMessageID, err := store.Insert(ctx, tx,
 			`INSERT INTO "g_message" ("g_thread_id", "sender_email", "sender_name", "body", `+
-				`"created_at", "sent_at") VALUES (?,?,?,?,?,?)`,
-			gThreadID, "mailer-daemon@"+b.OriginDomain, "Mailer Daemon", body, now, now)
+				`"created_at", "sent_at", "federation_id") VALUES (?,?,?,?,?,?,?)`,
+			gThreadID, "mailer-daemon@"+b.OriginDomain, "Mailer Daemon", body, now, now, bounceFedID)
 		if err != nil {
 			return fmt.Errorf("create bounce message: %w", err)
 		}

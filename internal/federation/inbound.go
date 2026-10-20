@@ -310,6 +310,7 @@ func (s *Service) toInbound(e *Envelope) (*Inbound, *Rejection) {
 	if err != nil {
 		return nil, reject(400, ErrSchemaViolation, "message.sent_at is not a timestamp")
 	}
+
 	in := &Inbound{
 		OriginDomain: e.OriginDomain,
 		ThreadFedID:  e.Thread.FederationID,

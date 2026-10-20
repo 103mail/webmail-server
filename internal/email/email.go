@@ -525,6 +525,12 @@ func (s *Service) aliasSet(ctx context.Context, customerID int64) (map[string]bo
 }
 
 // ListMessages returns the messages of a thread, newest first.
+// messageOrder lists a thread newest first in the order every Domain shares:
+// send time in whole seconds, then federation id (RFC 5.5). Messages from
+// before federation have no federation id and fall back to their row order.
+const messageOrder = `ORDER BY "g_message"."sent_at" DESC NULLS LAST, ` +
+	`"g_message"."federation_id" DESC NULLS LAST, "message"."id" DESC`
+
 func (s *Service) ListMessages(ctx context.Context, customerID, threadID int64, search string) ([]Message, error) {
 	var rows *sql.Rows
 	var err error
@@ -535,7 +541,7 @@ func (s *Service) ListMessages(ctx context.Context, customerID, threadID int64, 
 				`"g_message"."sender_name", "g_message"."body", "g_message"."sent_at" FROM "message" `+
 				`LEFT JOIN "g_message" ON "message"."g_message_id" = "g_message"."id" `+
 				`WHERE "customer_id" = ? AND "thread_id" = ? AND `+match+" "+
-				`ORDER BY "message"."id" DESC`,
+				messageOrder,
 			append([]any{customerID, threadID}, matchArgs...)...)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
@@ -543,7 +549,7 @@ func (s *Service) ListMessages(ctx context.Context, customerID, threadID int64, 
 				`"g_message"."sender_name", "g_message"."body", "g_message"."sent_at" FROM "message" `+
 				`LEFT JOIN "g_message" ON "message"."g_message_id" = "g_message"."id" `+
 				`WHERE "customer_id" = ? AND "message"."deleted_at" IS NULL AND "thread_id" = ? `+
-				`ORDER BY "message"."id" DESC`,
+				messageOrder,
 			customerID, threadID)
 	}
 	if err != nil {

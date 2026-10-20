@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/mevdschee/webmail-server/internal/federation"
 	"github.com/mevdschee/webmail-server/internal/mdconv"
@@ -21,7 +22,7 @@ import (
 // Everything here runs inside the caller's transaction, which is the point: the
 // canonical rows and the promise to deliver them commit together or not at all.
 func (s *Service) federate(ctx context.Context, tx *sql.Tx, gThreadID, gMessageID int64,
-	sender identity, subscribers []string, remote map[string][]string,
+	sentAt time.Time, sender identity, subscribers []string, remote map[string][]string,
 	body, bodyHTML string, attachments []NewAttachment) error {
 	if len(remote) == 0 {
 		return nil
@@ -88,7 +89,9 @@ func (s *Service) federate(ctx context.Context, tx *sql.Tx, gThreadID, gMessageI
 			SenderName:   sender.Name,
 			Body:         body,
 			BodyHTML:     bodyHTML,
-			SentAt:       s.db.Now(),
+			// The stored send time, not a second reading of the clock, which
+			// could fall in the next second and order the copies differently.
+			SentAt: sentAt,
 			// Recipients are only this Domain's share (RFC 5.3). Members are
 			// everyone, so a reply written there reaches every Domain.
 			Recipients:  addresses,

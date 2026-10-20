@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -414,6 +415,53 @@ func TestIncomingMembersBecomeSubscribers(t *testing.T) {
 	}
 }
 
+// Every Domain shows a thread in one order: by send time in whole seconds,
+// then by federation id, not by when each message arrived (RFC 5.5).
+func TestMessagesAreOrderedBySendTime(t *testing.T) {
+	f := newFixture(t)
+	bob, _, bobInbox := f.account("bob@example.test", "Bob")
+	inbound := func(messageFedID string, sentAt time.Time, body string) {
+		t.Helper()
+		if _, _, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+			OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+			Subject: "Order", MessageFedID: messageFedID,
+			SenderEmail: "pete@peer.test", SenderName: "Pete", Body: body, SentAt: sentAt,
+			Recipients: []string{"bob@example.test"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Pete's second message reaches Bob first, and two of his messages share
+	// a second and arrive in reverse order.
+	inbound("0192f0c0-0000-7000-8000-000000000020", f.now.Add(20*time.Second), "third")
+	inbound("0192f0c0-0000-7000-8000-000000000003", f.now, "second, same second as first")
+	inbound("0192f0c0-0000-7000-8000-000000000002", f.now, "first")
+	threads, err := f.svc.ListThreads(f.ctx, bob, bobInbox, "")
+	if err != nil || len(threads) != 1 {
+		t.Fatalf("Bob has %d threads, %v", len(threads), err)
+	}
+	// Bob replies with his clock between Pete's messages.
+	f.now = f.now.Add(10 * time.Second)
+	if _, err := f.svc.AddMessage(f.ctx, bob, threads[0].ThreadID, "<p>reply</p>", nil); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := f.svc.ListMessages(f.ctx, bob, threads[0].ThreadID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for i := len(messages) - 1; i >= 0; i-- { // the API lists newest first
+		got = append(got, strings.TrimSpace(messages[i].Body))
+	}
+	want := []string{"first", "second, same second as first", "reply", "third"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Bob reads %q, want %q", got, want)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "g_message" WHERE "federation_id" IS NULL`); n != 0 {
+		t.Errorf("%d messages have no federation id; it is assigned when a message is written", n)
+	}
+}
+
 // A mailbox's generated address is on a Domain this Server hosts, even when
 // the domain table also holds peers that federation discovered.
 func TestGeneratedAddressesStayOnHostedDomains(t *testing.T) {
@@ -658,6 +706,12 @@ func TestRemoteRecipientsAreQueued(t *testing.T) {
 		var envelope federation.Envelope
 		if err := json.Unmarshal([]byte(body), &envelope); err != nil {
 			t.Fatal(err)
+		}
+		// The envelope says when the message was written, which is the time
+		// stored with it, so both Domains order it the same (RFC 5.5).
+		if envelope.Message.SentAt != federation.FormatTimestamp(f.now) {
+			t.Errorf("the envelope to %s says sent at %s, want %s", peer, envelope.Message.SentAt,
+				federation.FormatTimestamp(f.now))
 		}
 		recipients := slices.Clone(envelope.Recipients)
 		slices.Sort(recipients)

@@ -213,6 +213,29 @@ func TestReplayAndDedup(t *testing.T) {
 	}
 }
 
+// The send time is taken as given, past or future: it is what orders the
+// thread on every Domain, so no Domain may replace it (RFC 5.5).
+func TestSendTimesAreTakenAsGiven(t *testing.T) {
+	db := storetest.Open(t)
+	now := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	db.Clock = func() time.Time { return now }
+	s := newStoreService(t, db)
+	for _, sent := range []time.Time{now.Add(ClockSkew + time.Hour), now.Add(-48 * time.Hour)} {
+		e := Envelope{
+			Thread:     Thread{FederationID: "0192f0c0-0000-7000-8000-000000000001"},
+			Message:    Message{FederationID: "0192f0c0-0000-7000-8000-000000000002", SenderEmail: "pete@peer.test", SentAt: FormatTimestamp(sent)},
+			Recipients: []string{"bob@example.test"},
+		}
+		in, r := s.toInbound(&e)
+		if r != nil {
+			t.Fatalf("toInbound: %v", r)
+		}
+		if !in.SentAt.Equal(sent) {
+			t.Errorf("sent %s became %s", sent, in.SentAt)
+		}
+	}
+}
+
 func TestOutboxListsWhereEachEnvelopeWent(t *testing.T) {
 	db := storetest.Open(t)
 	now := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)

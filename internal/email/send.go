@@ -248,10 +248,16 @@ func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gTh
 		return 0, fmt.Errorf("update thread summary: %w", err)
 	}
 
+	// The federation id is assigned now, with the send time, because together
+	// they order the thread on every Domain (RFC 5.5).
+	messageFedID, err := federation.NewUUID()
+	if err != nil {
+		return 0, err
+	}
 	gMessageID, err := store.Insert(ctx, tx,
 		`INSERT INTO "g_message" ("g_thread_id", "sender_email", "sender_name", "body", "body_html", `+
-			`"created_at", "sent_at") VALUES (?,?,?,?,?,?,?)`,
-		gThreadID, sender.Email, sender.Name, body, bodyHTML, now, now)
+			`"created_at", "sent_at", "federation_id") VALUES (?,?,?,?,?,?,?,?)`,
+		gThreadID, sender.Email, sender.Name, body, bodyHTML, now, now, messageFedID)
 	if err != nil {
 		return 0, fmt.Errorf("create message: %w", err)
 	}
@@ -392,7 +398,7 @@ func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gTh
 	// no further: relaying it on would mean signing someone else's content as
 	// this Domain.
 	if senderCustomerID != 0 {
-		if err := s.federate(ctx, tx, gThreadID, gMessageID, sender, subscribers, remote,
+		if err := s.federate(ctx, tx, gThreadID, gMessageID, now, sender, subscribers, remote,
 			body, bodyHTML, attachments); err != nil {
 			return 0, err
 		}
