@@ -381,8 +381,10 @@ func TestPartlyUnknownEnvelopeReportsTheUnknown(t *testing.T) {
 	if err != nil || len(threads) != 1 {
 		t.Fatalf("Bob has %d threads, %v", len(threads), err)
 	}
-	if messages, _ := f.svc.ListMessages(f.ctx, bob, threads[0].ThreadID, ""); len(messages) != 1 {
-		t.Errorf("Bob has %d messages after a replay, want 1", len(messages))
+	// Pete's message and the notice that nobody@example.test does not exist,
+	// each once, however often the envelope is replayed.
+	if messages, _ := f.svc.ListMessages(f.ctx, bob, threads[0].ThreadID, ""); len(messages) != 2 {
+		t.Errorf("Bob has %d messages after a replay, want Pete's and the refusal notice", len(messages))
 	}
 }
 
@@ -459,6 +461,179 @@ func TestMessagesAreOrderedBySendTime(t *testing.T) {
 	}
 	if n := f.count(`SELECT COUNT(*) FROM "g_message" WHERE "federation_id" IS NULL`); n != 0 {
 		t.Errorf("%d messages have no federation id; it is assigned when a message is written", n)
+	}
+}
+
+// An address the peer refused as unknown is not a member of the thread: it is
+// marked, not deleted, left out of the member list, and later messages do not
+// go to it, so the sender is bounced once (RFC 6.5).
+func TestRefusedRecipientsLeaveTheThread(t *testing.T) {
+	f := federatedFixture(t)
+	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
+	threadID, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"bob@peer.test", "nobody@peer.test"},
+		"Invitation", "<p>Come</p>", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadFedID, err := store.SelectString(f.ctx, f.db, `SELECT "federation_id" FROM "g_thread" LIMIT 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.Bounce(f.ctx, federation.BounceNotice{
+		OriginDomain: "example.test", SenderEmail: "alice@example.test", Subject: "Invitation",
+		ThreadFedID: threadFedID, Recipients: []string{"nobody@peer.test"}, PeerDomain: "peer.test",
+		EnvelopeID: "e", HTTPStatus: 202, ErrorCode: federation.ErrUnknownRecipient, Refused: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "g_subscription" WHERE "email" = 'nobody@peer.test' AND "refused_at" IS NOT NULL`); n != 1 {
+		t.Errorf("%d refused subscriptions for nobody@peer.test, want it marked", n)
+	}
+	threads, err := f.svc.ListThreads(f.ctx, alice, aliceInbox, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, th := range threads {
+		if th.ThreadID != threadID {
+			continue
+		}
+		for _, p := range th.Subscribers {
+			if p.Email == "nobody@peer.test" {
+				t.Error("Alice still sees nobody@peer.test as a member")
+			}
+		}
+	}
+
+	f.exec(`DELETE FROM "federation_outbox"`)
+	if _, err := f.svc.AddMessage(f.ctx, alice, threadID, "<p>Anyone else?</p>", nil); err != nil {
+		t.Fatal(err)
+	}
+	body, err := store.SelectString(f.ctx, f.db, `SELECT "body" FROM "federation_outbox" WHERE "peer_domain" = 'peer.test'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope federation.Envelope
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(envelope.Recipients, "nobody@peer.test") || slices.Contains(envelope.Thread.Members, "nobody@peer.test") {
+		t.Errorf("the reply still names nobody@peer.test: recipients %v, members %v",
+			envelope.Recipients, envelope.Thread.Members)
+	}
+}
+
+// Refusing an address on its own Domain, a Domain tells the thread's other
+// Domains the way an invitation is told: a message in the thread from its
+// mailer-daemon, with the address refused (RFC 6.5).
+func TestARefusalIsToldToTheThread(t *testing.T) {
+	f := federatedFixture(t)
+	bob, _, bobInbox := f.account("bob@example.test", "Bob")
+	_, refused, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+		Subject: "Invitation", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
+		SenderEmail: "pete@peer.test", SenderName: "Pete", Body: "Come", SentAt: f.now,
+		Recipients: []string{"bob@example.test", "nobody@example.test"},
+		Members:    []string{"pete@peer.test", "bob@example.test", "nobody@example.test", "erin@third.test"},
+	})
+	if err != nil || !slices.Equal(refused, []string{"nobody@example.test"}) {
+		t.Fatalf("DeliverInbound refused %v, %v", refused, err)
+	}
+
+	threads, err := f.svc.ListThreads(f.ctx, bob, bobInbox, "")
+	if err != nil || len(threads) != 1 {
+		t.Fatalf("Bob has %d threads, %v", len(threads), err)
+	}
+	messages, err := f.svc.ListMessages(f.ctx, bob, threads[0].ThreadID, "")
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("Bob has %d messages, want Pete's and the notice: %v", len(messages), err)
+	}
+	if notice := messages[0]; notice.SenderEmail != "mailer-daemon@example.test" ||
+		!strings.Contains(notice.Body, "nobody@example.test") {
+		t.Errorf("the notice = %+v", notice)
+	}
+
+	for peer, recipients := range map[string][]string{
+		"peer.test":  {"pete@peer.test"},
+		"third.test": {"erin@third.test"},
+	} {
+		body, err := store.SelectString(f.ctx, f.db,
+			`SELECT "body" FROM "federation_outbox" WHERE "peer_domain" = ?`, peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope federation.Envelope
+		if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Message.SenderEmail != "mailer-daemon@example.test" ||
+			!slices.Equal(envelope.Recipients, recipients) ||
+			!slices.Equal(envelope.Thread.Refused, []string{"nobody@example.test"}) ||
+			slices.Contains(envelope.Thread.Members, "nobody@example.test") ||
+			slices.Contains(envelope.Thread.Members, "mailer-daemon@example.test") {
+			t.Errorf("the notice to %s = %+v", peer, envelope)
+		}
+	}
+}
+
+// A notice can only refuse addresses on its sender's own domain, and the
+// daemon that sends it is never recorded as a member (RFC 5.3, 6.5).
+func TestARefusalOnlyCountsForTheSendersOwnAddresses(t *testing.T) {
+	f := newFixture(t)
+	bob, _, bobInbox := f.account("bob@example.test", "Bob")
+	members := []string{"pete@peer.test", "bob@example.test", "nobody@peer.test", "gail@third.test"}
+	if _, _, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+		Subject: "Party", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
+		SenderEmail: "pete@peer.test", SenderName: "Pete", Body: "Come", SentAt: f.now,
+		Recipients: []string{"bob@example.test"}, Members: members,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+		Subject: "Party", MessageFedID: "0192f0c0-0000-7000-8000-000000000003",
+		SenderEmail: "mailer-daemon@peer.test", SenderName: "Mailer Daemon",
+		Body: "nobody@peer.test does not exist", SentAt: f.now,
+		Recipients: []string{"bob@example.test"},
+		Members:    []string{"pete@peer.test", "bob@example.test", "gail@third.test"},
+		Refused:    []string{"nobody@peer.test", "gail@third.test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	threads, err := f.svc.ListThreads(f.ctx, bob, bobInbox, "")
+	if err != nil || len(threads) != 1 {
+		t.Fatalf("Bob has %d threads, %v", len(threads), err)
+	}
+	var subscribers []string
+	for _, p := range threads[0].Subscribers {
+		subscribers = append(subscribers, p.Email)
+	}
+	slices.Sort(subscribers)
+	if want := []string{"gail@third.test", "pete@peer.test"}; !slices.Equal(subscribers, want) {
+		t.Errorf("Bob sees subscribers %v, want %v", subscribers, want)
+	}
+}
+
+// An unknown address on this Server's own Domain in an envelope's members is
+// not recorded: it was refused, it is not on the thread (RFC 5.3).
+func TestUnknownLocalMembersAreNotRecorded(t *testing.T) {
+	f := newFixture(t)
+	bob, _, bobInbox := f.account("bob@example.test", "Bob")
+	if _, _, err := f.svc.DeliverInbound(f.ctx, federation.Inbound{
+		OriginDomain: "peer.test", ThreadFedID: "0192f0c0-0000-7000-8000-000000000001",
+		Subject: "Party", MessageFedID: "0192f0c0-0000-7000-8000-000000000002",
+		SenderEmail: "pete@peer.test", SenderName: "Pete", Body: "Come", SentAt: f.now,
+		Recipients: []string{"bob@example.test", "ghost@example.test"},
+		Members:    []string{"pete@peer.test", "bob@example.test", "ghost@example.test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	threads, err := f.svc.ListThreads(f.ctx, bob, bobInbox, "")
+	if err != nil || len(threads) != 1 {
+		t.Fatalf("Bob has %d threads, %v", len(threads), err)
+	}
+	if subs := threads[0].Subscribers; len(subs) != 1 || subs[0].Email != "pete@peer.test" {
+		t.Errorf("Bob sees subscribers %+v, want only Pete", subs)
 	}
 }
 
@@ -651,7 +826,10 @@ func TestTruncateCountsRunes(t *testing.T) {
 
 // A message to another Domain is queued in the same transaction, and the
 // thread and message get the federated ids a reply will correlate on.
-func TestRemoteRecipientsAreQueued(t *testing.T) {
+// federatedFixture is a fixture whose Server hosts example.test with
+// federation on, so addresses elsewhere are queued for their own Domains.
+func federatedFixture(t *testing.T) *fixture {
+	t.Helper()
 	dir := t.TempDir()
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -683,6 +861,11 @@ func TestRemoteRecipientsAreQueued(t *testing.T) {
 	}
 	f.svc = New(f.db, blob.New(t.TempDir()), nil, fed, nil)
 	fed.Attach(f.svc)
+	return f
+}
+
+func TestRemoteRecipientsAreQueued(t *testing.T) {
+	f := federatedFixture(t)
 	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
 
 	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"Bob@Peer.test", "carol@peer.test", "dave@other.test"},

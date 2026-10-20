@@ -93,7 +93,14 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 		if len(members) == 0 {
 			members = append([]string{in.SenderEmail}, in.Recipients...)
 		}
+		members, err = s.withoutUnknown(ctx, tx, members)
+		if err != nil {
+			return err
+		}
 		if err := s.subscribeAll(ctx, tx, gThreadID, members); err != nil {
+			return err
+		}
+		if err := s.applyRefusals(ctx, tx, gThreadID, in); err != nil {
 			return err
 		}
 
@@ -103,7 +110,10 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 			}
 		}
 		refused, err = s.undelivered(ctx, tx, in.MessageFedID, mine)
-		return err
+		if err != nil || len(refused) == 0 {
+			return err
+		}
+		return s.tellRefusal(ctx, tx, gThreadID, refused)
 	})
 	if err != nil {
 		return 0, nil, err
@@ -149,6 +159,98 @@ func (s *Service) undelivered(ctx context.Context, q store.Queryer, messageFedID
 		if n == 0 {
 			out = append(out, address)
 		}
+	}
+	return out, nil
+}
+
+// applyRefusals stops treating the addresses a notice refuses as members, but
+// only those on the sender's own domain: a Domain speaks for its own
+// addresses and no others (RFC 5.3, 6.5).
+func (s *Service) applyRefusals(ctx context.Context, tx *sql.Tx, gThreadID int64, in federation.Inbound) error {
+	origin := federation.DomainOf(in.SenderEmail)
+	args := []any{s.db.Now(), gThreadID}
+	for _, address := range in.Refused {
+		if address = store.Address(address); federation.DomainOf(address) == origin {
+			args = append(args, address)
+		}
+	}
+	if len(args) == 2 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE "g_subscription" SET "refused_at" = ? WHERE "g_thread_id" = ? AND "refused_at" IS NULL `+
+			`AND "email" IN (`+store.Placeholders(len(args)-2)+`)`, args...); err != nil {
+		return fmt.Errorf("apply refusals: %w", err)
+	}
+	return nil
+}
+
+// tellRefusal tells the thread that addresses on this Domain do not exist,
+// the way an invitation is told: a message in the thread, here from this
+// Domain's mailer-daemon, shown to the members on this Server and sent to
+// every other member's Domain with the addresses refused (RFC 6.5).
+func (s *Service) tellRefusal(ctx context.Context, tx *sql.Tx, gThreadID int64, refused []string) error {
+	domain := federation.DomainOf(refused[0])
+	sender := identity{Email: "mailer-daemon@" + domain, Name: "Mailer Daemon"}
+	body := fmt.Sprintf("%s does not exist on %s, so it is not on this thread.",
+		strings.Join(refused, ", "), domain)
+	now := s.db.Now()
+	fedID, err := federation.NewUUID()
+	if err != nil {
+		return err
+	}
+	gMessageID, err := store.Insert(ctx, tx,
+		`INSERT INTO "g_message" ("g_thread_id", "sender_email", "sender_name", "body", `+
+			`"created_at", "sent_at", "federation_id") VALUES (?,?,?,?,?,?,?)`,
+		gThreadID, sender.Email, sender.Name, body, now, now, fedID)
+	if err != nil {
+		return fmt.Errorf("create refusal notice: %w", err)
+	}
+
+	members, err := store.SelectStrings(ctx, tx,
+		`SELECT "email" FROM "g_subscription" WHERE "g_thread_id" = ? AND "refused_at" IS NULL`, gThreadID)
+	if err != nil {
+		return fmt.Errorf("list members: %w", err)
+	}
+	remote := map[string][]string{}
+	for _, member := range members {
+		if federation.IsMailerDaemon(member) {
+			continue
+		}
+		if s.isLocal(member) {
+			if _, err := s.projectInbound(ctx, tx, gThreadID, gMessageID, nil, member, sender); err != nil {
+				return err
+			}
+			continue
+		}
+		remote[federation.DomainOf(member)] = append(remote[federation.DomainOf(member)], member)
+	}
+	if len(remote) == 0 || s.federation == nil {
+		return nil
+	}
+	return s.federate(ctx, tx, gThreadID, gMessageID, now, sender, members, refused, remote, body, "", nil)
+}
+
+// withoutUnknown drops addresses on this Server's own Domains that have no
+// account. They were refused, so they are not members (RFC 5.3).
+func (s *Service) withoutUnknown(ctx context.Context, q store.Queryer, addresses []string) ([]string, error) {
+	out := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		address = store.Address(address)
+		own, err := s.ownDomain(ctx, q, address)
+		if err != nil {
+			return nil, err
+		}
+		if own {
+			known, err := store.SelectInt(ctx, q, `SELECT COUNT(*) FROM "alias" WHERE "email" = ?`, address)
+			if err != nil {
+				return nil, fmt.Errorf("look up %s: %w", address, err)
+			}
+			if known == 0 {
+				continue
+			}
+		}
+		out = append(out, address)
 	}
 	return out, nil
 }
@@ -257,10 +359,13 @@ func (s *Service) projectInbound(ctx context.Context, tx *sql.Tx, gThreadID, gMe
 			return false, fmt.Errorf("create recipient attachment: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO "contact" ("customer_id", "email", "name") VALUES (?,?,?) ON CONFLICT DO NOTHING`,
-		customerID, sender.Email, sender.Name); err != nil {
-		return false, fmt.Errorf("record sender as contact: %w", err)
+	// A mailer-daemon wrote a notice, it is not someone to write back to.
+	if !federation.IsMailerDaemon(sender.Email) {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO "contact" ("customer_id", "email", "name") VALUES (?,?,?) ON CONFLICT DO NOTHING`,
+			customerID, sender.Email, sender.Name); err != nil {
+			return false, fmt.Errorf("record sender as contact: %w", err)
+		}
 	}
 	return true, nil
 }
@@ -378,6 +483,23 @@ func (s *Service) Bounce(ctx context.Context, b federation.BounceNotice) error {
 			`INSERT INTO "message" ("customer_id", "thread_id", "g_message_id") VALUES (?,?,?)`,
 			customerID, threadID, gMessageID); err != nil {
 			return fmt.Errorf("create bounce message projection: %w", err)
+		}
+
+		// Recipients that do not exist did not receive the message and are not
+		// members: marked, not deleted, so later messages and the member list
+		// leave them out and the sender is told once (RFC 6.5).
+		if b.Refused && b.ThreadFedID != "" && len(b.Recipients) > 0 {
+			args := []any{now, b.ThreadFedID}
+			for _, r := range b.Recipients {
+				args = append(args, store.Address(r))
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE "g_subscription" SET "refused_at" = ? WHERE "refused_at" IS NULL `+
+					`AND "g_thread_id" IN (SELECT "id" FROM "g_thread" WHERE "federation_id" = ?) `+
+					`AND "email" IN (`+store.Placeholders(len(b.Recipients))+`)`,
+				args...); err != nil {
+				return fmt.Errorf("mark refused recipients: %w", err)
+			}
 		}
 		return nil
 	})

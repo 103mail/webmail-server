@@ -31,6 +31,7 @@ type Outbound struct {
 	SentAt       time.Time
 	Recipients   []string
 	Members      []string
+	Refused      []string
 	Attachments  []OutboundAttachment
 	// RelatedID is the local g_message id, kept so a bounce can name the
 	// message that failed.
@@ -68,6 +69,7 @@ func (s *Service) Enqueue(ctx context.Context, tx *sql.Tx, out Outbound) error {
 			FederationID: out.ThreadFedID,
 			Subject:      out.Subject,
 			Members:      out.Members,
+			Refused:      out.Refused,
 		},
 		Message: Message{
 			FederationID: out.MessageFedID,
@@ -371,6 +373,8 @@ func (s *Service) bounceRefused(ctx context.Context, row outboxRow, refused []Re
 			OriginDomain: row.OriginDomain,
 			SenderEmail:  envelope.Message.SenderEmail,
 			Subject:      envelope.Thread.Subject,
+			ThreadFedID:  envelope.Thread.FederationID,
+			Refused:      code == ErrUnknownRecipient,
 			Recipients:   addresses,
 			PeerDomain:   row.PeerDomain,
 			EnvelopeID:   row.EnvelopeID,
@@ -465,11 +469,14 @@ func (s *Service) fail(ctx context.Context, row outboxRow, httpStatus int, detai
 		OriginDomain: row.OriginDomain,
 		SenderEmail:  envelope.Message.SenderEmail,
 		Subject:      envelope.Thread.Subject,
-		Recipients:   envelope.Recipients,
-		PeerDomain:   row.PeerDomain,
-		EnvelopeID:   row.EnvelopeID,
-		HTTPStatus:   httpStatus,
-		ErrorCode:    detail,
+		ThreadFedID:  envelope.Thread.FederationID,
+		// 404 is only ever no_recipients: none of them exist there (RFC 6.3).
+		Refused:    httpStatus == http.StatusNotFound,
+		Recipients: envelope.Recipients,
+		PeerDomain: row.PeerDomain,
+		EnvelopeID: row.EnvelopeID,
+		HTTPStatus: httpStatus,
+		ErrorCode:  detail,
 	}); err != nil {
 		s.log.Error("could not write a bounce", "envelope", row.EnvelopeID, "error", err)
 	}

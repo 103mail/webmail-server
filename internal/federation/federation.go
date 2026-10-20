@@ -186,7 +186,9 @@ type Inbound struct {
 	SentAt       time.Time
 	Recipients   []string
 	// Members is everyone on the thread, on every Domain (RFC 5.3).
-	Members       []string
+	Members []string
+	// Refused are addresses the sender added that were refused (RFC 5.3).
+	Refused       []string
 	Attachments   []InboundAttachment
 	DestinationID int64 // customer that owns the receiving Domain, 0 if unknown
 }
@@ -205,11 +207,17 @@ type BounceNotice struct {
 	OriginDomain string
 	SenderEmail  string
 	Subject      string
-	Recipients   []string
-	PeerDomain   string
-	EnvelopeID   string
-	HTTPStatus   int
-	ErrorCode    string
+	// ThreadFedID is the thread the failed message was on.
+	ThreadFedID string
+	// Refused means the recipients do not exist at the peer, so they are not
+	// members of the thread and later messages should not go to them. A peer
+	// that was unreachable says nothing of the kind (RFC 6.5).
+	Refused    bool
+	Recipients []string
+	PeerDomain string
+	EnvelopeID string
+	HTTPStatus int
+	ErrorCode  string
 }
 
 // Service is the federation runtime: the local Domain registry, the peer cache

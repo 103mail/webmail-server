@@ -403,6 +403,7 @@ Table "g_subscription" {
   "id" bigint [pk, increment, not null]
   "g_thread_id" bigint [not null]
   "email" varchar(255) [not null]
+  "refused_at" timestamp [note: 'Set when the address was refused as unknown; it is then not a member (RFC 6.5)']
 
   indexes {
     ("g_thread_id") [name: "g_thread_id"]

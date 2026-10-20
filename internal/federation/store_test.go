@@ -265,3 +265,49 @@ func TestOutboxListsWhereEachEnvelopeWent(t *testing.T) {
 		t.Errorf("pending entry = %+v", pending)
 	}
 }
+
+// recordingDeliverer keeps the bounces the outbox asks for.
+type recordingDeliverer struct{ bounces []BounceNotice }
+
+func (d *recordingDeliverer) DeliverInbound(ctx context.Context, in Inbound) (int, []string, error) {
+	return 0, nil, nil
+}
+func (d *recordingDeliverer) Undelivered(ctx context.Context, in Inbound) ([]string, error) {
+	return nil, nil
+}
+func (d *recordingDeliverer) Bounce(ctx context.Context, b BounceNotice) error {
+	d.bounces = append(d.bounces, b)
+	return nil
+}
+
+// A bounce says when its recipients do not exist, so the sender's Domain stops
+// sending to them; a Domain that was down says nothing of the kind (RFC 6.5).
+func TestBouncesSayWhenRecipientsAreUnknown(t *testing.T) {
+	db := storetest.Open(t)
+	ctx := context.Background()
+	s := newStoreService(t, db)
+	d := &recordingDeliverer{}
+	s.Attach(d)
+	enqueue(t, s, "peer.test", 3)
+	rows, err := s.claim(ctx, "peer.test", 10)
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("claim = %d, %v", len(rows), err)
+	}
+
+	s.bounceRefused(ctx, rows[0], []Refusal{{Address: "bob@peer.test", Error: ErrUnknownRecipient}})
+	s.fail(ctx, rows[1], 404, "no_recipients")
+	s.fail(ctx, rows[2], 503, "timed_out")
+
+	if len(d.bounces) != 3 {
+		t.Fatalf("%d bounces, want 3", len(d.bounces))
+	}
+	for i, want := range []bool{true, true, false} {
+		b := d.bounces[i]
+		if b.Refused != want {
+			t.Errorf("bounce %d (%d %s): Refused = %v, want %v", i, b.HTTPStatus, b.ErrorCode, b.Refused, want)
+		}
+		if b.ThreadFedID != "0192f0c0-0000-7000-8000-000000000001" {
+			t.Errorf("bounce %d names thread %q", i, b.ThreadFedID)
+		}
+	}
+}

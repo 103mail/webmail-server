@@ -231,7 +231,7 @@ func senderIdentity(ctx context.Context, q store.Queryer, customerID, mailboxID 
 func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gThreadID int64,
 	sender identity, bodyHTML string, attachments []NewAttachment, onboarded *[]invitee) (int64, error) {
 	subscribers, err := store.SelectStrings(ctx, tx,
-		`SELECT "email" FROM "g_subscription" WHERE "g_thread_id" = ?`, gThreadID)
+		`SELECT "email" FROM "g_subscription" WHERE "g_thread_id" = ? AND "refused_at" IS NULL`, gThreadID)
 	if err != nil {
 		return 0, fmt.Errorf("list subscribers: %w", err)
 	}
@@ -398,7 +398,7 @@ func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gTh
 	// no further: relaying it on would mean signing someone else's content as
 	// this Domain.
 	if senderCustomerID != 0 {
-		if err := s.federate(ctx, tx, gThreadID, gMessageID, now, sender, subscribers, remote,
+		if err := s.federate(ctx, tx, gThreadID, gMessageID, now, sender, subscribers, nil, remote,
 			body, bodyHTML, attachments); err != nil {
 			return 0, err
 		}

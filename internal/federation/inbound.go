@@ -323,6 +323,7 @@ func (s *Service) toInbound(e *Envelope) (*Inbound, *Rejection) {
 		SentAt:       sentAt,
 		Recipients:   e.Recipients,
 		Members:      e.Members(),
+		Refused:      e.Thread.Refused,
 	}
 	if e.Thread.InReplyTo != nil {
 		in.InReplyTo = *e.Thread.InReplyTo

@@ -44,6 +44,10 @@ type Thread struct {
 	// the Destination's share, so this is how a Destination learns who else a
 	// reply written there has to reach (RFC 5.3).
 	Members []string `json:"members,omitempty"`
+	// Refused are addresses the sender added that their own Domain refused.
+	// The Destination stops treating them as members, if this sender is the
+	// one who added them (RFC 5.3, 6.5).
+	Refused []string `json:"refused,omitempty"`
 }
 
 // Message is the content itself.
@@ -191,13 +195,28 @@ func (e *Envelope) Validate(maxAttachmentBytes int64) *Rejection {
 	if len(e.Thread.Members) > maxMembers {
 		return reject(400, ErrSchemaViolation, "thread.members holds more than 1000 addresses")
 	}
+	if len(e.Thread.Refused) > maxRecipients {
+		return reject(400, ErrSchemaViolation, "thread.refused holds more than 100 addresses")
+	}
+	for _, address := range e.Thread.Refused {
+		if !validAddress(address) {
+			return reject(400, ErrSchemaViolation, "refused entry is not an address: "+address)
+		}
+		if slices.ContainsFunc(e.Thread.Members, func(m string) bool { return strings.EqualFold(m, address) }) {
+			return reject(400, ErrSchemaViolation, address+" is both refused and a member")
+		}
+	}
 	if len(e.Thread.Members) > 0 {
 		for _, address := range e.Thread.Members {
 			if !validAddress(address) {
 				return reject(400, ErrSchemaViolation, "member is not an address: "+address)
 			}
 		}
-		for _, address := range append([]string{e.Message.SenderEmail}, e.Recipients...) {
+		required := e.Recipients
+		if !IsMailerDaemon(e.Message.SenderEmail) {
+			required = append([]string{e.Message.SenderEmail}, required...)
+		}
+		for _, address := range required {
 			if !slices.ContainsFunc(e.Thread.Members, func(m string) bool { return strings.EqualFold(m, address) }) {
 				return reject(400, ErrSchemaViolation, "thread.members leaves out "+address)
 			}
@@ -215,11 +234,18 @@ func (e *Envelope) Members() []string {
 	}
 	out := make([]string, 0, len(members))
 	for _, m := range members {
-		if m = strings.ToLower(strings.TrimSpace(m)); !slices.Contains(out, m) {
+		if m = strings.ToLower(strings.TrimSpace(m)); !IsMailerDaemon(m) && !slices.Contains(out, m) {
 			out = append(out, m)
 		}
 	}
 	return out
+}
+
+// IsMailerDaemon reports whether an address is a Domain's mailer-daemon, which
+// sends bounces and refusal notices and is never a member of a thread (RFC 6.5).
+func IsMailerDaemon(address string) bool {
+	local, _, ok := strings.Cut(strings.ToLower(strings.TrimSpace(address)), "@")
+	return ok && local == "mailer-daemon"
 }
 
 // RecipientsOn checks that every recipient is on the Destination's own DNS

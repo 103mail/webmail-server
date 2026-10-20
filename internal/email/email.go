@@ -484,7 +484,7 @@ func (s *Service) subscribersByThread(ctx context.Context, customerID int64, gTh
 			`FROM "g_subscription" `+
 			`LEFT JOIN "contact" ON "g_subscription"."email" = "contact"."email" `+
 			`AND "contact"."customer_id" = ? `+
-			`WHERE "g_thread_id" IN (`+in+")",
+			`WHERE "g_thread_id" IN (`+in+`) AND "refused_at" IS NULL`,
 		append([]any{customerID}, store.Args(gThreadIDs)...)...)
 	if err != nil {
 		return nil, fmt.Errorf("list thread subscribers: %w", err)
@@ -594,7 +594,7 @@ func (s *Service) ListMessages(ctx context.Context, customerID, threadID int64, 
 	names, err := store.SelectPairs(ctx, s.db,
 		`SELECT "g_subscription"."email", "contact"."name" FROM "g_subscription" `+
 			`LEFT JOIN "contact" ON "g_subscription"."email" = "contact"."email" `+
-			`AND "contact"."customer_id" = ? WHERE "g_thread_id" = ?`,
+			`AND "contact"."customer_id" = ? WHERE "g_thread_id" = ? AND "refused_at" IS NULL`,
 		customerID, gThreadID)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriber names: %w", err)

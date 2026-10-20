@@ -345,7 +345,8 @@ CREATE TABLE "g_schedule" (
 CREATE TABLE "g_subscription" (
     "id" BIGSERIAL PRIMARY KEY,
     "g_thread_id" bigint NOT NULL,
-    "email" varchar(255) NOT NULL
+    "email" varchar(255) NOT NULL,
+    "refused_at" timestamp
 );
 CREATE INDEX "g_subscription_g_thread_id" ON "g_subscription" ("g_thread_id");
 CREATE UNIQUE INDEX "thread_email" ON "g_subscription" ("g_thread_id", "email");
@@ -589,4 +590,6 @@ ALTER TABLE "typing_indicator" ADD CONSTRAINT "fk_typing_indicator_customer_id" 
 ALTER TABLE "typing_indicator" ADD CONSTRAINT "fk_typing_indicator_g_chat_id" FOREIGN KEY ("g_chat_id") REFERENCES "g_chat" ("id") ON DELETE CASCADE;
 ALTER TABLE "typing_indicator" ADD CONSTRAINT "fk_typing_indicator_user_id" FOREIGN KEY ("user_id") REFERENCES "user" ("id") ON DELETE CASCADE;
 ALTER TABLE "user" ADD CONSTRAINT "fk_user_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE;
+
+COMMENT ON COLUMN "g_subscription"."refused_at" IS 'Set when the address was refused as unknown; it is then not a member (RFC 6.5)';
 

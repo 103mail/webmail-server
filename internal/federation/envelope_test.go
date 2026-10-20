@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,18 @@ func TestValidateEnforcesFieldRules(t *testing.T) {
 		{"members without a recipient", func(e *Envelope) {
 			e.Thread.Members = []string{"alice@103mail.com", "erin@mail.acme.test"}
 		}, 400, ErrSchemaViolation},
+		{"a refused address that is not an address", func(e *Envelope) {
+			e.Thread.Refused = []string{"nobody"}
+		}, 400, ErrSchemaViolation},
+		{"a refused address that is also a member", func(e *Envelope) {
+			e.Thread.Members = []string{"alice@103mail.com", "bob@example.com", "nobody@example.com"}
+			e.Thread.Refused = []string{"nobody@example.com"}
+		}, 400, ErrSchemaViolation},
+		{"too many refused addresses", func(e *Envelope) {
+			for i := 0; i <= maxRecipients; i++ {
+				e.Thread.Refused = append(e.Thread.Refused, "nobody@example.com")
+			}
+		}, 400, ErrSchemaViolation},
 		{"too many attachments", func(e *Envelope) {
 			for i := 0; i <= maxAttachments; i++ {
 				e.Attachments = append(e.Attachments, attachmentOf([]byte("x")))
@@ -127,6 +140,22 @@ func TestMembersOfAThread(t *testing.T) {
 	}
 	if got := e.Members(); strings.Join(got, ",") != "alice@103mail.com,bob@example.com,erin@mail.acme.test" {
 		t.Errorf("Members = %v", got)
+	}
+}
+
+// A refusal notice comes from mailer-daemon, which is never a member: its
+// members leave it out, and it is not added back (RFC 6.5).
+func TestMailerDaemonIsNeverAMember(t *testing.T) {
+	e := validEnvelope()
+	e.Message.SenderEmail = "mailer-daemon@103mail.com"
+	e.Thread.Members = []string{"alice@103mail.com", "bob@example.com"}
+	e.Thread.Refused = []string{"nobody@103mail.com"}
+	if r := e.Validate(DefaultMaxAttachmentBytes); r != nil {
+		t.Fatalf("a notice without mailer-daemon among its members was rejected: %v", r)
+	}
+	e.Thread.Members = nil
+	if got := e.Members(); slices.Contains(got, "mailer-daemon@103mail.com") {
+		t.Errorf("Members = %v, includes mailer-daemon", got)
 	}
 }
 

@@ -327,6 +327,7 @@ CREATE TABLE "g_subscription" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
     "g_thread_id" bigint NOT NULL,
     "email" varchar(255) NOT NULL,
+    "refused_at" timestamp,
     CONSTRAINT "fk_g_subscription_g_thread_id" FOREIGN KEY ("g_thread_id") REFERENCES "g_thread" ("id") ON DELETE CASCADE
 );
 CREATE INDEX "g_subscription_g_thread_id" ON "g_subscription" ("g_thread_id");
