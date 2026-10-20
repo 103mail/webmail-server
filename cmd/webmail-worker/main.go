@@ -7,9 +7,10 @@
 // putting that behind a user's compose would mean the compose waits for a peer
 // that may be down. See ADR 17 and principle 5.
 //
-// Running several instances is safe. Rows are claimed with SELECT ... FOR UPDATE
-// SKIP LOCKED before any network work, so two workers never send the same
-// envelope, and delivery is idempotent at the receiver anyway.
+// Running several instances is safe. Rows are leased to one worker before any
+// network work, so two workers never send the same envelope, and delivery is
+// idempotent at the receiver anyway. A worker that dies loses its leases when
+// they expire, so its rows need no one to put them back (ADR 19).
 package main
 
 import (
@@ -40,9 +41,6 @@ const (
 	// sweepEvery is how often aged-out dedup, nonce and delivered-outbox rows
 	// are deleted. There is no hurry: retention is measured in days.
 	sweepEvery = 15 * time.Minute
-	// stuckAfter is how long an in-flight row may sit before it is assumed to
-	// belong to a worker that died and is put back.
-	stuckAfter = 10 * time.Minute
 )
 
 func main() {
@@ -113,8 +111,7 @@ func run(log *slog.Logger) error {
 	defer sweep.Stop()
 
 	// One pass immediately, so a restart does not wait a full interval before
-	// picking up whatever the previous process left behind.
-	requeue(ctx, fed, log)
+	// picking up whatever is due.
 	drainOnce(ctx, fed, log)
 
 	for {
@@ -125,7 +122,6 @@ func run(log *slog.Logger) error {
 		case <-drain.C:
 			drainOnce(ctx, fed, log)
 		case <-sweep.C:
-			requeue(ctx, fed, log)
 			if err := fed.Sweep(ctx); err != nil && ctx.Err() == nil {
 				log.Error("sweep failed", "error", err)
 			}
@@ -146,11 +142,5 @@ func drainOnce(ctx context.Context, fed *federation.Service, log *slog.Logger) {
 	}
 	if handled > 0 {
 		log.Info("drained the outbox", "envelopes", handled)
-	}
-}
-
-func requeue(ctx context.Context, fed *federation.Service, log *slog.Logger) {
-	if err := fed.RequeueStuck(ctx, stuckAfter); err != nil && ctx.Err() == nil {
-		log.Error("could not requeue stuck envelopes", "error", err)
 	}
 }

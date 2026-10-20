@@ -222,8 +222,9 @@ func (s *Service) checkSignature(ctx context.Context, req *Request) *Rejection {
 // deciding, so two concurrent requests carrying the same nonce cannot both pass.
 func (s *Service) claimNonce(ctx context.Context, sender, endpoint, nonce string) *Rejection {
 	result, err := s.db.ExecContext(ctx,
-		"INSERT IGNORE INTO `federation_nonce` (`sender_domain`, `endpoint`, `nonce`) VALUES (?,?,?)",
-		sender, endpoint, nonce)
+		`INSERT INTO "federation_nonce" ("sender_domain", "endpoint", "nonce", "seen_at") VALUES (?,?,?,?) `+
+			`ON CONFLICT DO NOTHING`,
+		sender, endpoint, nonce, s.db.Now())
 	if err != nil {
 		return reject(500, ErrServerError, "could not record the nonce")
 	}
@@ -240,7 +241,7 @@ func (s *Service) claimNonce(ctx context.Context, sender, endpoint, nonce string
 func (s *Service) alreadyAccepted(ctx context.Context, sender, envelopeID string) (bool, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `id` FROM `federation_inbox` WHERE `sender_domain` = ? AND `envelope_id` = ? LIMIT 1",
+		`SELECT "id" FROM "federation_inbox" WHERE "sender_domain" = ? AND "envelope_id" = ? LIMIT 1`,
 		sender, envelopeID).Scan(&id)
 	if err == sql.ErrNoRows {
 		return false, nil
@@ -253,8 +254,9 @@ func (s *Service) alreadyAccepted(ctx context.Context, sender, envelopeID string
 
 func (s *Service) recordAccepted(ctx context.Context, sender, envelopeID string) error {
 	if _, err := s.db.ExecContext(ctx,
-		"INSERT IGNORE INTO `federation_inbox` (`sender_domain`, `envelope_id`) VALUES (?,?)",
-		sender, envelopeID); err != nil {
+		`INSERT INTO "federation_inbox" ("sender_domain", "envelope_id", "received_at") VALUES (?,?,?) `+
+			`ON CONFLICT DO NOTHING`,
+		sender, envelopeID, s.db.Now()); err != nil {
 		return fmt.Errorf("record accepted envelope: %w", err)
 	}
 	return nil

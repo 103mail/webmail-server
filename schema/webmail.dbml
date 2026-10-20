@@ -1,16 +1,15 @@
-// Readable model of the webmail schema, in portable types (ADR 19). It renders
-// to PostgreSQL as written, and to SQLite with database_type set to 'SQLite'
-// or with `dbml-tools migrate` against a sqlite:// DSN. SQLite needs dbml-tools
-// 0.9.7 or later. webmail.sql is the MySQL DDL the server runs on until ADR 19
-// is implemented, so the two now differ in column types.
+// The schema, in portable types (ADR 19). It is the source of truth: the
+// PostgreSQL and SQLite DDL next to it are generated from it by generate.sh,
+// which needs dbml-tools 0.9.10 or later, and the search indexes, which DBML
+// cannot describe, are in search.*.sql.
+// webmail.sql is the MySQL DDL of the PHP monolith, kept as the reference for
+// migrating its data; the Go backend does not run on it.
 //
-// Generated with `dbml-tools todbml`, then corrected by hand in three places
+// Generated with `dbml-tools todbml`, then corrected by hand in two places
 // because that round trip does not currently survive its own tooling:
 //   - `todbml` emits `Project {` with no name, which `dbml-tools check` rejects.
 //   - `todbml` emits `[delete: set null]`, which the parser rejects unquoted.
-//   - `tosql` emits foreign keys with no ON DELETE / ON UPDATE action, so it
-//     cannot reproduce the cascades this schema depends on.
-// Regenerating this file will reintroduce the first two.
+// Regenerating this file will reintroduce both.
 
 Project "webmail" {
   database_type: 'PostgreSQL'
@@ -199,6 +198,11 @@ Table "federation_outbox" {
   "idempotency_key" varchar(36) [not null]
   "related_id" bigint
   "status" varchar(20) [not null, default: 'pending']
+  // A lease rather than a lock: a worker claims a row by writing its name and
+  // a deadline, and a row whose deadline has passed is claimable again, which
+  // is what returns the work of a worker that died (ADR 19).
+  "claimed_by" varchar(64)
+  "claimed_until" timestamp
   "attempts" integer [not null, default: 0]
   "last_error" text
   "last_http_status" integer
@@ -402,6 +406,7 @@ Table "g_subscription" {
 
   indexes {
     ("g_thread_id") [name: "g_thread_id"]
+    ("g_thread_id", "email") [unique, name: "thread_email"]
   }
 }
 

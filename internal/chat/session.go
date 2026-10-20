@@ -35,10 +35,10 @@ func (s *Service) NewSession(ctx context.Context, customerID, userID int64) (*Se
 		return nil, fmt.Errorf("generate client id: %w", err)
 	}
 	clientID := base64.RawURLEncoding.EncodeToString(buf)
-	expires := time.Now().Add(SessionTTL)
+	expires := s.db.Now().Add(SessionTTL)
 
 	if _, err := s.db.ExecContext(ctx,
-		"INSERT INTO `chat_session` (`client_id`, `customer_id`, `user_id`, `expires_at`) "+
+		`INSERT INTO "chat_session" ("client_id", "customer_id", "user_id", "expires_at") `+
 			"VALUES (?,?,?,?)", clientID, customerID, userID, expires); err != nil {
 		return nil, fmt.Errorf("create chat session: %w", err)
 	}
@@ -57,35 +57,20 @@ func (s *Service) NewSession(ctx context.Context, customerID, userID int64) (*Se
 // on the same id fails, so a ClientId observed in a log cannot be used to open a
 // parallel connection as that user.
 func (s *Service) ClaimSession(ctx context.Context, clientID string) (*Session, error) {
+	// One conditional update is the claim: it succeeds for exactly one caller
+	// on either engine, without a row lock SQLite could not take.
 	var session Session
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		var connectedAt, closedAt sql.NullTime
-		var expiresAt time.Time
-		err := tx.QueryRowContext(ctx,
-			"SELECT `customer_id`, `user_id`, `expires_at`, `connected_at`, `closed_at` "+
-				"FROM `chat_session` WHERE `client_id` = ? LIMIT 1 FOR UPDATE", clientID).
-			Scan(&session.CustomerID, &session.UserID, &expiresAt, &connectedAt, &closedAt)
-		if err == sql.ErrNoRows {
-			return errNoSession
-		}
-		if err != nil {
-			return fmt.Errorf("look up chat session: %w", err)
-		}
-		if connectedAt.Valid || closedAt.Valid {
-			return errNoSession
-		}
-		if time.Now().After(expiresAt) {
-			return errNoSession
-		}
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE `chat_session` SET `connected_at` = NOW(), `last_seen_at` = NOW() "+
-				"WHERE `client_id` = ?", clientID); err != nil {
-			return fmt.Errorf("claim chat session: %w", err)
-		}
-		return nil
-	})
+	now := s.db.Now()
+	err := s.db.QueryRowContext(ctx,
+		`UPDATE "chat_session" SET "connected_at" = ?, "last_seen_at" = ? `+
+			`WHERE "client_id" = ? AND "connected_at" IS NULL AND "closed_at" IS NULL `+
+			`AND "expires_at" >= ? RETURNING "customer_id", "user_id"`,
+		now, now, clientID, now).Scan(&session.CustomerID, &session.UserID)
+	if err == sql.ErrNoRows {
+		return nil, errNoSession
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("claim chat session: %w", err)
 	}
 	session.ClientID = clientID
 	return &session, nil
@@ -105,8 +90,8 @@ func IsNoSession(err error) bool { return err == errNoSession }
 func (s *Service) LiveSession(ctx context.Context, clientID string) (*Session, error) {
 	var session Session
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `customer_id`, `user_id` FROM `chat_session` "+
-			"WHERE `client_id` = ? AND `connected_at` IS NOT NULL AND `closed_at` IS NULL LIMIT 1",
+		`SELECT "customer_id", "user_id" FROM "chat_session" `+
+			`WHERE "client_id" = ? AND "connected_at" IS NOT NULL AND "closed_at" IS NULL LIMIT 1`,
 		clientID).Scan(&session.CustomerID, &session.UserID)
 	if err == sql.ErrNoRows {
 		return nil, errNoSession
@@ -115,7 +100,7 @@ func (s *Service) LiveSession(ctx context.Context, clientID string) (*Session, e
 		return nil, fmt.Errorf("look up live chat session: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"UPDATE `chat_session` SET `last_seen_at` = NOW() WHERE `client_id` = ?", clientID); err != nil {
+		`UPDATE "chat_session" SET "last_seen_at" = ? WHERE "client_id" = ?`, s.db.Now(), clientID); err != nil {
 		return nil, fmt.Errorf("touch chat session: %w", err)
 	}
 	session.ClientID = clientID
@@ -126,8 +111,8 @@ func (s *Service) LiveSession(ctx context.Context, clientID string) (*Session, e
 // disconnect, and when a push finds the client is no longer there.
 func (s *Service) CloseSession(ctx context.Context, clientID string) error {
 	if _, err := s.db.ExecContext(ctx,
-		"UPDATE `chat_session` SET `closed_at` = NOW() WHERE `client_id` = ? AND `closed_at` IS NULL",
-		clientID); err != nil {
+		`UPDATE "chat_session" SET "closed_at" = ? WHERE "client_id" = ? AND "closed_at" IS NULL`,
+		s.db.Now(), clientID); err != nil {
 		return fmt.Errorf("close chat session: %w", err)
 	}
 	return nil
@@ -151,10 +136,10 @@ type Target struct {
 // (ADR 13).
 func (s *Service) SessionsForChat(ctx context.Context, gChatID int64) ([]Target, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT DISTINCT `s`.`client_id`, `c`.`id` FROM `chat_session` `s` "+
-			"JOIN `chat` `c` ON `c`.`customer_id` = `s`.`customer_id` AND `c`.`g_chat_id` = ? "+
-			"WHERE `c`.`deleted_at` IS NULL "+
-			"AND `s`.`connected_at` IS NOT NULL AND `s`.`closed_at` IS NULL", gChatID)
+		`SELECT DISTINCT "s"."client_id", "c"."id" FROM "chat_session" "s" `+
+			`JOIN "chat" "c" ON "c"."customer_id" = "s"."customer_id" AND "c"."g_chat_id" = ? `+
+			`WHERE "c"."deleted_at" IS NULL `+
+			`AND "s"."connected_at" IS NOT NULL AND "s"."closed_at" IS NULL`, gChatID)
 	if err != nil {
 		return nil, fmt.Errorf("list sessions for chat: %w", err)
 	}
@@ -176,15 +161,15 @@ func (s *Service) SessionsForChat(ctx context.Context, gChatID int64) ([]Target,
 // common has no business knowing whether this user is online.
 func (s *Service) SessionsForPeers(ctx context.Context, customerID int64) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT DISTINCT `s`.`client_id` FROM `chat_session` `s` "+
-			"JOIN `alias` `a` ON `a`.`customer_id` = `s`.`customer_id` "+
-			"JOIN `g_chat_participant` `p` ON `p`.`email` = `a`.`email` AND `p`.`left_at` IS NULL "+
-			"WHERE `p`.`g_chat_id` IN ("+
-			"  SELECT `mine`.`g_chat_id` FROM `g_chat_participant` `mine` "+
-			"  JOIN `alias` `ma` ON `ma`.`email` = `mine`.`email` "+
-			"  WHERE `ma`.`customer_id` = ? AND `mine`.`left_at` IS NULL) "+
-			"AND `s`.`connected_at` IS NOT NULL AND `s`.`closed_at` IS NULL "+
-			"AND `s`.`customer_id` <> ?", customerID, customerID)
+		`SELECT DISTINCT "s"."client_id" FROM "chat_session" "s" `+
+			`JOIN "alias" "a" ON "a"."customer_id" = "s"."customer_id" `+
+			`JOIN "g_chat_participant" "p" ON "p"."email" = "a"."email" AND "p"."left_at" IS NULL `+
+			`WHERE "p"."g_chat_id" IN (`+
+			`  SELECT "mine"."g_chat_id" FROM "g_chat_participant" "mine" `+
+			`  JOIN "alias" "ma" ON "ma"."email" = "mine"."email" `+
+			`  WHERE "ma"."customer_id" = ? AND "mine"."left_at" IS NULL) `+
+			`AND "s"."connected_at" IS NOT NULL AND "s"."closed_at" IS NULL `+
+			`AND "s"."customer_id" <> ?`, customerID, customerID)
 	if err != nil {
 		return nil, fmt.Errorf("list peer sessions: %w", err)
 	}
@@ -197,7 +182,7 @@ func (s *Service) SessionsForPeers(ctx context.Context, customerID int64) ([]str
 // participants by address and the client has no way to join the two otherwise.
 func (s *Service) PrimaryAlias(ctx context.Context, customerID int64) (string, error) {
 	email, err := store.SelectString(ctx, s.db,
-		"SELECT `email` FROM `alias` WHERE `customer_id` = ? ORDER BY `id` LIMIT 1", customerID)
+		`SELECT "email" FROM "alias" WHERE "customer_id" = ? ORDER BY "id" LIMIT 1`, customerID)
 	if err != nil {
 		return "", fmt.Errorf("look up primary alias: %w", err)
 	}
@@ -208,7 +193,7 @@ func (s *Service) PrimaryAlias(ctx context.Context, customerID int64) (string, e
 // what the participant tables are keyed by.
 func (s *Service) GChatID(ctx context.Context, customerID, chatID int64) (int64, error) {
 	id, err := store.SelectInt(ctx, s.db,
-		"SELECT `g_chat_id` FROM `chat` WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
+		`SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
 		customerID, chatID)
 	if err != nil {
 		return 0, fmt.Errorf("look up canonical chat: %w", err)
@@ -223,21 +208,20 @@ func (s *Service) GChatID(ctx context.Context, customerID, chatID int64) (int64,
 // The quiet-session rule is what covers a proxy that was killed: no disconnect
 // ever arrives, so nothing else would ever mark those rows closed.
 func (s *Service) SweepSessions(ctx context.Context, idleAfter, keepClosed time.Duration) error {
+	now := s.db.Now()
 	if _, err := s.db.ExecContext(ctx,
-		"UPDATE `chat_session` SET `closed_at` = NOW() "+
-			"WHERE `closed_at` IS NULL AND `connected_at` IS NULL AND `expires_at` < NOW()"); err != nil {
+		`UPDATE "chat_session" SET "closed_at" = ? `+
+			`WHERE "closed_at" IS NULL AND "connected_at" IS NULL AND "expires_at" < ?`, now, now); err != nil {
 		return fmt.Errorf("close unclaimed chat sessions: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"UPDATE `chat_session` SET `closed_at` = NOW() "+
-			"WHERE `closed_at` IS NULL AND `connected_at` IS NOT NULL "+
-			"AND `last_seen_at` < DATE_SUB(NOW(), INTERVAL ? SECOND)",
-		int(idleAfter.Seconds())); err != nil {
+		`UPDATE "chat_session" SET "closed_at" = ? `+
+			`WHERE "closed_at" IS NULL AND "connected_at" IS NOT NULL AND "last_seen_at" < ?`,
+		now, now.Add(-idleAfter)); err != nil {
 		return fmt.Errorf("close idle chat sessions: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"DELETE FROM `chat_session` WHERE `closed_at` < DATE_SUB(NOW(), INTERVAL ? SECOND)",
-		int(keepClosed.Seconds())); err != nil {
+		`DELETE FROM "chat_session" WHERE "closed_at" < ?`, now.Add(-keepClosed)); err != nil {
 		return fmt.Errorf("delete closed chat sessions: %w", err)
 	}
 	return nil
@@ -263,7 +247,7 @@ func collectStrings(rows *sql.Rows) ([]string, error) {
 func (s *Service) MarkChatRead(ctx context.Context, customerID, chatID int64) error {
 	return s.db.Tx(ctx, func(tx *sql.Tx) error {
 		gChatID, err := store.SelectInt(ctx, tx,
-			"SELECT `g_chat_id` FROM `chat` WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
+			`SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
 			customerID, chatID)
 		if err != nil {
 			return fmt.Errorf("look up chat: %w", err)
@@ -272,7 +256,7 @@ func (s *Service) MarkChatRead(ctx context.Context, customerID, chatID int64) er
 			return nil
 		}
 		newest, err := store.SelectInt(ctx, tx,
-			"SELECT MAX(`id`) FROM `g_chat_message` WHERE `g_chat_id` = ? AND `deleted_at` IS NULL",
+			`SELECT MAX("id") FROM "g_chat_message" WHERE "g_chat_id" = ? AND "deleted_at" IS NULL`,
 			gChatID)
 		if err != nil {
 			return fmt.Errorf("look up newest message: %w", err)
@@ -281,13 +265,13 @@ func (s *Service) MarkChatRead(ctx context.Context, customerID, chatID int64) er
 			return nil
 		}
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE `chat_message` SET `read_at` = NOW() "+
-				"WHERE `customer_id` = ? AND `chat_id` = ? AND `read_at` IS NULL",
-			customerID, chatID); err != nil {
+			`UPDATE "chat_message" SET "read_at" = ? `+
+				`WHERE "customer_id" = ? AND "chat_id" = ? AND "read_at" IS NULL`,
+			s.db.Now(), customerID, chatID); err != nil {
 			return fmt.Errorf("mark messages read: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE `chat` SET `last_read_message_id` = ? WHERE `customer_id` = ? AND `id` = ?",
+			`UPDATE "chat" SET "last_read_message_id" = ? WHERE "customer_id" = ? AND "id" = ?`,
 			newest, customerID, chatID); err != nil {
 			return fmt.Errorf("advance read marker: %w", err)
 		}

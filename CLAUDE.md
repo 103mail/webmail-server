@@ -84,7 +84,8 @@ adapted to Go. See `docs/adr/` for the reasoning behind each.
 - `cmd/` holds binaries (API server, workers). `internal/` holds everything else.
   `pkg/` only for code genuinely meant for outside consumers.
 - Standard library first. Only proven dependencies; `database/sql` with
-  `go-sql-driver/mysql` rather than an ORM.
+  `jackc/pgx/v5` and `modernc.org/sqlite` rather than an ORM. Both drivers are
+  pure Go, so builds stay cgo-free.
 - Wrap errors with `%w` and handle them at the boundary. No panics in request or
   worker paths.
 - `gofmt` and `go vet` clean before commit. This is the equivalent of the PHP
@@ -93,18 +94,28 @@ adapted to Go. See `docs/adr/` for the reasoning behind each.
 
 ## Database
 
-- MySQL, singular snake_case tables, canonical `g_*` tables plus per-user
-  projections, matching the PHP schema so data can be migrated in place.
+- PostgreSQL in production, SQLite in every test environment (ADR 19). Singular
+  snake_case tables, canonical `g_*` tables plus per-user projections, matching
+  the PHP schema so its data can be migrated.
+- Write the one portable dialect both engines accept: `"quoted"` identifiers,
+  `?` placeholders, the current time from `db.Now()` rather than `NOW()`,
+  `ON CONFLICT` instead of `INSERT IGNORE` and `ON DUPLICATE KEY`, `RETURNING`
+  (via `store.Insert`) instead of `LastInsertId`, `TRUE`/`FALSE` for booleans,
+  and no `LIMIT` on `UPDATE` or `DELETE`. Engine differences live only in
+  `internal/store`, full-text search included (`db.Match`).
+- Store and compare email addresses lowercase (`store.Address`).
 - Keep the schema as DBML and generate SQL and migrations with `../dbml-tools`
-  (`dbml-tools check`, `tosql`, `migrate`).
+  (`dbml-tools check`, `tosql`, `migrate`); `schema/generate.sh` renders both
+  engines' DDL.
 - Times are stored in UTC. IANA timezone identifiers are stored alongside for
   display only.
 
 ## Testing
 
 - `go test ./...` must pass. Mirror the PHP layout: unit tests for logic,
-  integration tests against a real MySQL for projection rules, end-to-end tests
-  driving the SPA.
+  integration tests against a real database for projection rules
+  (`internal/store/storetest`, SQLite by default, PostgreSQL with
+  `WEBMAIL_TEST_POSTGRES_DSN`), end-to-end tests driving the SPA.
 - External services (mail providers, federation peers) must be mockable so tests
   stay deterministic.
 - Cover every exported function of a package before merging it.

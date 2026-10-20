@@ -1,13 +1,14 @@
 #!/bin/bash
 # Prepare everything the compose stack needs that cannot be checked in: TLS
-# certificates, per-Domain federation keypairs and config, seed SQL, and the
-# attachment directories.
+# certificates, per-Domain federation keypairs and config, seed SQL, the
+# attachment directories, and one SQLite database per Domain (ADR 19).
 #
 # Idempotent. Re-running keeps existing certificates and keys, so the CA you
 # trusted in the browser stays valid and pinned public keys do not change.
 #
 # Usage:  ./setup.sh [--reseed]
-#   --reseed   rebuild the seed SQL even if it already exists
+#   --reseed   rebuild the seed SQL and the databases even if they exist,
+#              discarding whatever the stack has written to them
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -18,6 +19,11 @@ CA_KEY="$CERTS/webmail-local-ca.key"
 CA_CRT="$CERTS/webmail-local-ca.crt"
 RESEED=false
 [[ "${1:-}" == "--reseed" ]] && RESEED=true
+
+if ! command -v sqlite3 >/dev/null; then
+    echo "sqlite3 is needed to build the databases (apt install sqlite3)" >&2
+    exit 1
+fi
 
 mkdir -p "$CERTS" seed keys
 
@@ -98,31 +104,63 @@ if [[ -d "$PHP_DATA" ]] && [[ -z "$(ls -A data/103mail.com/attachments 2>/dev/nu
 fi
 
 # ── Seed SQL ────────────────────────────────────────────────────────────────
-# Data only. The schema comes from ../schema/webmail.sql, mounted alongside.
-if [[ ! -s seed/103mail.com.sql ]] || $RESEED; then
-    echo "dumping the local webmail database into seed/103mail.com.sql"
-    if ! mysqldump -u webmail -pwebmail --no-create-info --skip-extended-insert \
-            --single-transaction --no-tablespaces webmail > seed/103mail.com.sql 2>/dev/null; then
+# Data only, as SQLite SQL. The schema comes from ../schema/webmail.sqlite.sql.
+if [[ ! -s seed/103mail.com.sqlite.sql ]] || $RESEED; then
+    echo "dumping the local webmail database into seed/103mail.com.mysql.sql"
+    if mysqldump -u webmail -pwebmail --no-create-info --skip-extended-insert \
+            --complete-insert --single-transaction --no-tablespaces webmail \
+            > seed/103mail.com.mysql.sql 2>/dev/null; then
+        dump=seed/103mail.com.mysql.sql
+    elif [[ -s seed/103mail.com.sql ]] && grep -q '^INSERT INTO' seed/103mail.com.sql; then
+        # A dump left by an earlier version of this script, from when the
+        # stack ran MariaDB.
+        echo "  no local webmail database reachable; converting the earlier dump in seed/103mail.com.sql"
+        dump=seed/103mail.com.sql
+    else
+        dump=""
+    fi
+    if [[ -n "$dump" ]]; then
+        # The dump has no domain row for the Domain this Server hosts. Design
+        # 3 retires the "customer_id IS NULL" singleton, so mark it local.
+        {
+            cat "$dump"
+            printf '%s\n' "INSERT INTO \`domain\` (\`name\`, \`customer_id\`) SELECT '103mail.com', 1" \
+                "  WHERE NOT EXISTS (SELECT 1 FROM \`domain\` WHERE \`name\` = '103mail.com');"
+        } | ./mysql2sqlite.py > seed/103mail.com.sqlite.sql
+    else
         echo "  no local webmail database reachable; writing a minimal seed instead" >&2
         ./seed.sh 103mail.com "maurits@vdschee.nl" "Maurits van der Schee" \
-            "mevdschee@103mail.com" > seed/103mail.com.sql
-    else
-        # The dump has no domain row for the Domain this Server hosts. Design 3
-        # retires the "customer_id IS NULL" singleton, so mark it local instead.
-        cat >> seed/103mail.com.sql <<'SQL'
-
--- The Domain this Server is authoritative for.
-INSERT INTO `domain` (`name`, `customer_id`) SELECT '103mail.com', 1
-  WHERE NOT EXISTS (SELECT 1 FROM `domain` WHERE `name` = '103mail.com');
-SQL
+            "mevdschee@103mail.com" > seed/103mail.com.sqlite.sql
     fi
 fi
 
-if [[ ! -s seed/example.com.sql ]] || $RESEED; then
-    echo "writing seed/example.com.sql"
+if [[ ! -s seed/example.com.sqlite.sql ]] || $RESEED; then
+    echo "writing seed/example.com.sqlite.sql"
     ./seed.sh example.com "bob@example.com" "Bob Jansen" "bob@example.com" \
-        > seed/example.com.sql
+        > seed/example.com.sqlite.sql
 fi
+
+# ── Databases ───────────────────────────────────────────────────────────────
+# One SQLite file per Domain, in the directory that Domain's API and worker
+# both mount as /data. Built once from the schema and the seed, with every
+# address lowercased the way the server stores them. Delete a file, or pass
+# --reseed, to start that Domain over.
+#
+# The schema has to apply cleanly. The seed does not: a dump of a database
+# whose schema has drifted from ours loses the statements that do not fit,
+# which are listed, rather than the whole Domain.
+for d in "${DOMAINS[@]}"; do
+    db="data/$d/webmail.db"
+    if [[ -f "$db" ]] && ! $RESEED; then continue; fi
+    echo "building $db"
+    rm -f "$db" "$db-wal" "$db-shm"
+    cat ../schema/webmail.sqlite.sql ../schema/search.sqlite.sql | sqlite3 -bail "$db"
+    errors=$(cat "seed/$d.sqlite.sql" lowercase.sql | sqlite3 "$db" 2>&1 >/dev/null || true)
+    if [[ -n "$errors" ]]; then
+        echo "  $(grep -c . <<<"$errors") seed statements failed and were skipped, the first:" >&2
+        head -n 3 <<<"$errors" | sed 's/^/    /' >&2
+    fi
+done
 
 echo
 echo "done. Next:"

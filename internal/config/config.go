@@ -12,7 +12,8 @@ import (
 type Config struct {
 	// Addr is the listen address, for example ":8080".
 	Addr string
-	// DSN is the MySQL connection string.
+	// DSN names the database. Its scheme selects the engine: postgres:// in
+	// production, sqlite:// for a file in development and tests (ADR 19).
 	DSN string
 	// DataDir holds attachment and document bytes. It must be the same
 	// directory the PHP backend uses while both run against one database.
@@ -42,7 +43,7 @@ type Config struct {
 func Load() (*Config, error) {
 	c := &Config{
 		Addr:    env("WEBMAIL_ADDR", ":8080"),
-		DSN:     env("WEBMAIL_DSN", "webmail:webmail@tcp(127.0.0.1:3306)/webmail"),
+		DSN:     env("WEBMAIL_DSN", "sqlite://data/webmail.db"),
 		DataDir: env("WEBMAIL_DATA_DIR", "data"),
 		AllowedOrigins: strings.Split(env("WEBMAIL_ALLOWED_ORIGINS",
 			"http://localhost:4000,http://localhost:8000,http://localhost:5173,"+

@@ -13,7 +13,7 @@ import (
 
 // ListDomains returns every domain this deployment is authoritative for.
 func (s *Service) ListDomains(ctx context.Context) ([]string, error) {
-	domains, err := store.SelectStrings(ctx, s.db, "SELECT `name` FROM `domain`")
+	domains, err := store.SelectStrings(ctx, s.db, `SELECT "name" FROM "domain"`)
 	if err != nil {
 		return nil, fmt.Errorf("list domains: %w", err)
 	}
@@ -85,21 +85,27 @@ func DecodeNumericEntities(s string) string {
 // because no recipient has a mailbox here.
 func (s *Service) AddExternalThread(ctx context.Context, senderEmail, senderName string,
 	subscribers []string, subject, bodyHTML string, attachments []NewAttachment) (int64, error) {
+	senderEmail = store.Address(senderEmail)
 	if senderEmail == "" {
 		return 0, nil
 	}
+	addresses := make([]string, len(subscribers))
+	for i, email := range subscribers {
+		addresses[i] = store.Address(email)
+	}
+	subscribers = addresses
 	var gThreadID int64
 	var onboarded []invitee
 	sender := identity{Email: senderEmail, Name: senderName}
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		var err error
 		gThreadID, err = store.Insert(ctx, tx,
-			"INSERT INTO `g_thread` (`subject_line`) VALUES (?)", subject)
+			`INSERT INTO "g_thread" ("subject_line") VALUES (?)`, subject)
 		if err != nil {
 			return fmt.Errorf("create thread: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			"INSERT IGNORE INTO `g_subscription` (`g_thread_id`, `email`) VALUES (?,?)",
+			`INSERT INTO "g_subscription" ("g_thread_id", "email") VALUES (?,?) ON CONFLICT DO NOTHING`,
 			gThreadID, senderEmail); err != nil {
 			return fmt.Errorf("subscribe sender: %w", err)
 		}
@@ -108,7 +114,7 @@ func (s *Service) AddExternalThread(ctx context.Context, senderEmail, senderName
 				continue
 			}
 			if _, err := tx.ExecContext(ctx,
-				"INSERT IGNORE INTO `g_subscription` (`g_thread_id`, `email`) VALUES (?,?)",
+				`INSERT INTO "g_subscription" ("g_thread_id", "email") VALUES (?,?) ON CONFLICT DO NOTHING`,
 				gThreadID, email); err != nil {
 				return fmt.Errorf("subscribe %s: %w", email, err)
 			}
@@ -141,7 +147,7 @@ func (s *Service) SeenInbound(ctx context.Context, providerID string) (bool, err
 		return false, nil
 	}
 	res, err := s.db.ExecContext(ctx,
-		"INSERT IGNORE INTO `inbound_email` (`provider_id`) VALUES (?)", providerID)
+		`INSERT INTO "inbound_email" ("provider_id") VALUES (?) ON CONFLICT DO NOTHING`, providerID)
 	if err != nil {
 		return false, fmt.Errorf("record inbound message: %w", err)
 	}

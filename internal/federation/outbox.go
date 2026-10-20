@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,7 +61,7 @@ func (s *Service) Enqueue(ctx context.Context, tx *sql.Tx, out Outbound) error {
 		Version:      Version,
 		EnvelopeID:   envelopeID,
 		OriginDomain: out.OriginDomain,
-		OriginSentAt: FormatTimestamp(time.Now()),
+		OriginSentAt: FormatTimestamp(s.db.Now()),
 		Thread: Thread{
 			FederationID: out.ThreadFedID,
 			Subject:      out.Subject,
@@ -96,11 +97,14 @@ func (s *Service) Enqueue(ctx context.Context, tx *sql.Tx, out Outbound) error {
 	if out.RelatedID != 0 {
 		relatedID = out.RelatedID
 	}
+	now := s.db.Now()
+	// The body is UTF-8 JSON and goes in as text. Passed as bytes, SQLite
+	// would store a blob in the text column.
 	if _, err := tx.ExecContext(ctx,
-		"INSERT INTO `federation_outbox` (`kind`, `peer_domain`, `origin_domain`, `body`, "+
-			"`idempotency_key`, `related_id`, `status`, `next_retry_at`) "+
-			"VALUES ('envelope',?,?,?,?,?, 'pending', NOW())",
-		out.PeerDomain, out.OriginDomain, body, envelopeID, relatedID); err != nil {
+		`INSERT INTO "federation_outbox" ("kind", "peer_domain", "origin_domain", "body", `+
+			`"idempotency_key", "related_id", "status", "next_retry_at", "created_at") `+
+			"VALUES ('envelope',?,?,?,?,?, 'pending', ?, ?)",
+		out.PeerDomain, out.OriginDomain, string(body), envelopeID, relatedID, now, now); err != nil {
 		return fmt.Errorf("enqueue envelope for %s: %w", out.PeerDomain, err)
 	}
 	return nil
@@ -150,9 +154,11 @@ func (s *Service) Drain(ctx context.Context, limit int) (int, error) {
 }
 
 func (s *Service) duePeers(ctx context.Context) ([]string, error) {
+	now := s.db.Now()
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT DISTINCT `peer_domain` FROM `federation_outbox` "+
-			"WHERE `status` = 'pending' AND `next_retry_at` <= NOW()")
+		`SELECT DISTINCT "peer_domain" FROM "federation_outbox" `+
+			`WHERE "status" = 'pending' AND "next_retry_at" <= ? `+
+			`AND ("claimed_until" IS NULL OR "claimed_until" < ?)`, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("list peers with work: %w", err)
 	}
@@ -168,40 +174,45 @@ func (s *Service) duePeers(ctx context.Context) ([]string, error) {
 	return peers, rows.Err()
 }
 
-// claim marks rows in flight before doing any network work, so two workers
-// cannot send the same envelope twice.
+// claim leases due rows to this worker before doing any network work, so two
+// workers cannot send the same envelope twice.
+//
+// The lease is one UPDATE that re-checks the claim in its own WHERE clause. On
+// PostgreSQL a second worker that waited on the row lock re-evaluates that
+// condition against the row the first one wrote, finds the lease taken and
+// skips the row; SQLite has a single writer, so the question does not arise. A
+// worker that dies holding a lease loses it when it expires, and the row is
+// claimable again: nothing has to notice the death (ADR 19).
 func (s *Service) claim(ctx context.Context, peer string, limit int) ([]outboxRow, error) {
+	now := s.db.Now()
+	rows, err := s.db.QueryContext(ctx,
+		`UPDATE "federation_outbox" SET "claimed_by" = ?, "claimed_until" = ? `+
+			`WHERE "id" IN (SELECT "id" FROM "federation_outbox" `+
+			`WHERE "status" = 'pending' AND "next_retry_at" <= ? AND "peer_domain" = ? `+
+			`AND ("claimed_until" IS NULL OR "claimed_until" < ?) `+
+			`ORDER BY "next_retry_at", "id" LIMIT ?) `+
+			`AND "status" = 'pending' AND ("claimed_until" IS NULL OR "claimed_until" < ?) `+
+			`RETURNING "id", "peer_domain", "origin_domain", "body", "idempotency_key", "attempts", "created_at"`,
+		s.worker, now.Add(Lease), now, peer, now, limit, now)
+	if err != nil {
+		return nil, fmt.Errorf("claim outbox rows: %w", err)
+	}
+	defer rows.Close()
 	var claimed []outboxRow
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx,
-			"SELECT `id`, `peer_domain`, `origin_domain`, `body`, `idempotency_key`, `attempts`, `created_at` "+
-				"FROM `federation_outbox` WHERE `status` = 'pending' AND `next_retry_at` <= NOW() "+
-				"AND `peer_domain` = ? ORDER BY `next_retry_at` LIMIT ? FOR UPDATE SKIP LOCKED",
-			peer, limit)
-		if err != nil {
-			return fmt.Errorf("select outbox rows: %w", err)
+	for rows.Next() {
+		var r outboxRow
+		if err := rows.Scan(&r.ID, &r.PeerDomain, &r.OriginDomain, &r.Body,
+			&r.EnvelopeID, &r.Attempts, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan outbox row: %w", err)
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var r outboxRow
-			if err := rows.Scan(&r.ID, &r.PeerDomain, &r.OriginDomain, &r.Body,
-				&r.EnvelopeID, &r.Attempts, &r.CreatedAt); err != nil {
-				return fmt.Errorf("scan outbox row: %w", err)
-			}
-			claimed = append(claimed, r)
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		for _, r := range claimed {
-			if _, err := tx.ExecContext(ctx,
-				"UPDATE `federation_outbox` SET `status` = 'in_flight' WHERE `id` = ?", r.ID); err != nil {
-				return fmt.Errorf("claim outbox row: %w", err)
-			}
-		}
-		return nil
-	})
-	return claimed, err
+		claimed = append(claimed, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim outbox rows: %w", err)
+	}
+	// RETURNING promises no order; send oldest first.
+	sort.Slice(claimed, func(i, j int) bool { return claimed[i].ID < claimed[j].ID })
+	return claimed, nil
 }
 
 // attempt makes one delivery attempt and records what happened.
@@ -220,7 +231,7 @@ func (s *Service) attempt(ctx context.Context, row outboxRow) {
 		}
 		s.fail(ctx, row, status, detail)
 
-	case time.Since(row.CreatedAt) >= RetryBudget:
+	case s.db.Now().Sub(row.CreatedAt) >= RetryBudget:
 		// The 72-hour budget is a hard stop; retrying past it is forbidden and
 		// the sender is owed an answer.
 		s.fail(ctx, row, status, "timed_out")
@@ -329,9 +340,10 @@ func retryAfterOf(resp *http.Response) time.Duration {
 
 func (s *Service) finish(ctx context.Context, row outboxRow, status string, httpStatus int, detail string) {
 	if _, err := s.db.ExecContext(ctx,
-		"UPDATE `federation_outbox` SET `status` = ?, `attempts` = `attempts` + 1, "+
-			"`last_http_status` = ?, `last_error` = ?, `delivered_at` = NOW() WHERE `id` = ?",
-		status, nullableStatus(httpStatus), nullableDetail(detail), row.ID); err != nil {
+		`UPDATE "federation_outbox" SET "status" = ?, "attempts" = "attempts" + 1, `+
+			`"last_http_status" = ?, "last_error" = ?, "delivered_at" = ?, `+
+			`"claimed_by" = NULL, "claimed_until" = NULL WHERE "id" = ?`,
+		status, nullableStatus(httpStatus), nullableDetail(detail), s.db.Now(), row.ID); err != nil {
 		s.log.Error("could not record delivery", "id", row.ID, "error", err)
 	}
 }
@@ -346,10 +358,10 @@ func (s *Service) reschedule(ctx context.Context, row outboxRow, httpStatus int,
 		delay = retryAfter
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"UPDATE `federation_outbox` SET `status` = 'pending', `attempts` = `attempts` + 1, "+
-			"`last_http_status` = ?, `last_error` = ?, `next_retry_at` = DATE_ADD(NOW(), INTERVAL ? SECOND) "+
-			"WHERE `id` = ?",
-		nullableStatus(httpStatus), nullableDetail(detail), int(delay.Seconds()), row.ID); err != nil {
+		`UPDATE "federation_outbox" SET "status" = 'pending', "attempts" = "attempts" + 1, `+
+			`"last_http_status" = ?, "last_error" = ?, "next_retry_at" = ?, `+
+			`"claimed_by" = NULL, "claimed_until" = NULL WHERE "id" = ?`,
+		nullableStatus(httpStatus), nullableDetail(detail), s.db.Now().Add(delay), row.ID); err != nil {
 		s.log.Error("could not reschedule an envelope", "id", row.ID, "error", err)
 		return
 	}
@@ -401,34 +413,20 @@ func (s *Service) fail(ctx context.Context, row outboxRow, httpStatus int, detai
 // Sweep deletes state that has aged out: dedup records past their retention,
 // nonces past the replay window, and delivered outbox rows.
 func (s *Service) Sweep(ctx context.Context) error {
+	now := s.db.Now()
 	statements := []struct {
-		query string
-		arg   int
+		query  string
+		cutoff time.Time
 	}{
-		{"DELETE FROM `federation_inbox` WHERE `received_at` < DATE_SUB(NOW(), INTERVAL ? HOUR)",
-			int(DedupRetention.Hours())},
-		{"DELETE FROM `federation_nonce` WHERE `seen_at` < DATE_SUB(NOW(), INTERVAL ? MINUTE)",
-			int(NonceWindow.Minutes())},
-		{"DELETE FROM `federation_outbox` WHERE `status` = 'delivered' AND " +
-			"`delivered_at` < DATE_SUB(NOW(), INTERVAL ? HOUR)", int(DedupRetention.Hours())},
+		{`DELETE FROM "federation_inbox" WHERE "received_at" < ?`, now.Add(-DedupRetention)},
+		{`DELETE FROM "federation_nonce" WHERE "seen_at" < ?`, now.Add(-NonceWindow)},
+		{`DELETE FROM "federation_outbox" WHERE "status" = 'delivered' AND "delivered_at" < ?`,
+			now.Add(-DedupRetention)},
 	}
 	for _, s2 := range statements {
-		if _, err := s.db.ExecContext(ctx, s2.query, s2.arg); err != nil {
+		if _, err := s.db.ExecContext(ctx, s2.query, s2.cutoff); err != nil {
 			return fmt.Errorf("sweep federation state: %w", err)
 		}
-	}
-	return nil
-}
-
-// RequeueStuck returns rows left in flight by a worker that died mid-attempt.
-// At-least-once delivery plus receiver-side dedup is what makes this safe: the
-// peer may have accepted the envelope already and will replay its 202.
-func (s *Service) RequeueStuck(ctx context.Context, olderThan time.Duration) error {
-	_, err := s.db.ExecContext(ctx,
-		"UPDATE `federation_outbox` SET `status` = 'pending' WHERE `status` = 'in_flight' "+
-			"AND `next_retry_at` < DATE_SUB(NOW(), INTERVAL ? SECOND)", int(olderThan.Seconds()))
-	if err != nil {
-		return fmt.Errorf("requeue stuck envelopes: %w", err)
 	}
 	return nil
 }
@@ -455,8 +453,8 @@ func nullableDetail(detail string) any {
 	if detail == "" {
 		return nil
 	}
-	if len(detail) > 2000 {
-		detail = detail[:2000]
+	if r := []rune(detail); len(r) > 2000 {
+		detail = string(r[:2000])
 	}
 	return detail
 }

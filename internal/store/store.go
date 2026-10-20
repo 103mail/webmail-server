@@ -1,20 +1,43 @@
 // Package store owns the database connection and the small query helpers the
 // domain packages share. It holds no domain knowledge of its own.
+//
+// Production runs PostgreSQL and every test environment runs SQLite (ADR 19).
+// The domain packages write one portable dialect: ANSI quoted identifiers, ?
+// placeholders, the current time passed in from Go, ON CONFLICT and RETURNING.
+// What the engines do not share is confined to this package: opening the
+// connection, rebinding placeholders, engine settings, and full-text search.
 package store
 
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+	"modernc.org/sqlite"
+)
+
+// Engine is the database engine behind a DB.
+type Engine string
+
+const (
+	Postgres Engine = "postgres"
+	SQLite   Engine = "sqlite"
 )
 
 // DB wraps *sql.DB with the helpers the domain packages need.
 type DB struct {
 	*sql.DB
+	Engine Engine
+	// Clock is the time source for every timestamp the application writes.
+	// Queries never read the engine's clock, so a test can move time by
+	// replacing this.
+	Clock func() time.Time
 }
 
 // Queryer is satisfied by both *sql.DB and *sql.Tx, so domain helpers can run
@@ -25,28 +48,82 @@ type Queryer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// Open connects to MySQL. Times are read as UTC so the API can format them as
-// RFC 3339 without guessing a server timezone.
+// Open connects to the database a DSN names. The scheme selects the engine:
+// postgres:// (or postgresql://) for PostgreSQL, sqlite:// for an SQLite file,
+// as in sqlite:///var/lib/webmail/webmail.db.
 func Open(dsn string) (*DB, error) {
-	cfg, err := mysql.ParseDSN(dsn)
+	scheme, rest, _ := strings.Cut(dsn, "://")
+	switch strings.ToLower(scheme) {
+	case "postgres", "postgresql":
+		return openPostgres(dsn)
+	case "sqlite":
+		return openSQLite(rest)
+	}
+	return nil, fmt.Errorf("unsupported database DSN %q: want postgres:// or sqlite://", redact(dsn))
+}
+
+func openPostgres(dsn string) (*DB, error) {
+	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
-	cfg.ParseTime = true
-	cfg.Loc = time.UTC
-	if cfg.Params == nil {
-		cfg.Params = map[string]string{}
-	}
-	cfg.Params["time_zone"] = "'+00:00'"
-
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
-	}
+	// Columns are timestamp without time zone holding UTC (ADR 8). The session
+	// zone decides what CURRENT_TIMESTAMP defaults write, so it has to be UTC
+	// too, whatever the server is configured with.
+	cfg.RuntimeParams["timezone"] = "UTC"
+	base := stdlib.GetConnector(*cfg)
+	db := sql.OpenDB(&connector{open: base.Connect, driver: base.Driver(), engine: Postgres})
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(25)
 	db.SetConnMaxLifetime(5 * time.Minute)
-	return &DB{db}, nil
+	return newDB(db, Postgres), nil
+}
+
+// openSQLite opens a file in WAL mode with a busy timeout, so a Domain's API
+// and worker can share it, and with foreign keys enforced, so tests see the
+// same references and cascades as PostgreSQL. Write transactions take the
+// write lock when they begin rather than at their first write, which is what
+// lets two processes wait on each other instead of failing with SQLITE_BUSY.
+func openSQLite(path string) (*DB, error) {
+	path, query, _ := strings.Cut(path, "?")
+	if path == "" {
+		return nil, fmt.Errorf("sqlite DSN names no file")
+	}
+	params, err := url.ParseQuery(query)
+	if err != nil {
+		return nil, fmt.Errorf("parse dsn: %w", err)
+	}
+	params.Add("_pragma", "foreign_keys(1)")
+	params.Add("_pragma", "busy_timeout(10000)")
+	params.Add("_pragma", "journal_mode(WAL)")
+	params.Add("_pragma", "synchronous(NORMAL)")
+	params.Set("_txlock", "immediate")
+	name := "file:" + path + "?" + params.Encode()
+
+	drv := &sqlite.Driver{}
+	open := func(context.Context) (driver.Conn, error) { return drv.Open(name) }
+	db := sql.OpenDB(&connector{open: open, driver: drv, engine: SQLite})
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
+	return newDB(db, SQLite), nil
+}
+
+func newDB(db *sql.DB, engine Engine) *DB {
+	return &DB{DB: db, Engine: engine, Clock: time.Now}
+}
+
+// redact drops the password from a DSN so it can appear in an error.
+func redact(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.User == nil {
+		return dsn
+	}
+	return u.Redacted()
+}
+
+// Now is the current time as the application stores it: UTC, whole seconds.
+func (db *DB) Now() time.Time {
+	return db.Clock().UTC().Truncate(time.Second)
 }
 
 // Tx runs fn inside a transaction, rolling back on error or panic.
@@ -172,13 +249,14 @@ func SelectPairs(ctx context.Context, q Queryer, query string, args ...any) (map
 	return out, rows.Err()
 }
 
-// Insert runs an INSERT and returns the generated id.
+// Insert runs an INSERT and returns the generated id. The statement is sent
+// with RETURNING "id" appended, because PostgreSQL has no LastInsertId.
 func Insert(ctx context.Context, q Queryer, query string, args ...any) (int64, error) {
-	res, err := q.ExecContext(ctx, query, args...)
-	if err != nil {
+	var id int64
+	if err := q.QueryRowContext(ctx, query+` RETURNING "id"`, args...).Scan(&id); err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 // Affected runs a statement and returns the number of rows it changed.
@@ -188,4 +266,49 @@ func Affected(ctx context.Context, q Queryer, query string, args ...any) (int64,
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// NullTime scans a timestamp from either engine. PostgreSQL always returns a
+// time, and SQLite does for a timestamp column, but SQLite returns the stored
+// text for an expression such as MAX("created_at"), which loses the column's
+// declared type. sql.NullTime cannot read that.
+type NullTime struct {
+	Time  time.Time
+	Valid bool
+}
+
+// Scan implements sql.Scanner.
+func (t *NullTime) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		t.Time, t.Valid = time.Time{}, false
+		return nil
+	case time.Time:
+		t.Time, t.Valid = v.UTC(), true
+		return nil
+	case string:
+		return t.parse(v)
+	case []byte:
+		return t.parse(string(v))
+	}
+	return fmt.Errorf("cannot scan %T into a time", src)
+}
+
+func (t *NullTime) parse(s string) error {
+	for _, layout := range []string{sqliteTime, "2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02T15:04:05.999999999Z07:00", "2006-01-02T15:04:05", "2006-01-02"} {
+		if parsed, err := time.Parse(layout, s); err == nil {
+			t.Time, t.Valid = parsed.UTC(), true
+			return nil
+		}
+	}
+	return fmt.Errorf("cannot parse %q as a time", s)
+}
+
+// Address normalises an email address for storage and comparison. Addresses
+// are kept lowercase because PostgreSQL and SQLite compare text exactly, where
+// MySQL's default collation ignored case (ADR 19). Every address that reaches
+// a query from outside goes through this first.
+func Address(address string) string {
+	return strings.ToLower(strings.TrimSpace(address))
 }

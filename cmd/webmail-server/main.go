@@ -109,6 +109,16 @@ func run(log *slog.Logger) error {
 	if err := db.PingContext(ctx); err != nil {
 		return err
 	}
+	// An empty database gets the schema, which is what lets a new Domain start
+	// from nothing but an SQLite file name (ADR 19). An existing one is left
+	// alone; schema changes are migrations.
+	created, err := db.CreateSchema(ctx)
+	if err != nil {
+		return err
+	}
+	if created {
+		log.Info("created the database schema", "engine", db.Engine)
+	}
 
 	attachments := blob.New(filepath.Join(cfg.DataDir, "attachments"))
 	documents := blob.New(filepath.Join(cfg.DataDir, "documents"))

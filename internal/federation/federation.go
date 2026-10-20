@@ -47,6 +47,11 @@ const (
 	RetryBase   = 30 * time.Second
 	RetryCap    = time.Hour
 	RetryBudget = 72 * time.Hour
+
+	// Lease is how long a worker holds the outbox rows it claimed. It is ours,
+	// not the RFC's, and only has to outlast one delivery pass: a worker that
+	// dies holding rows delays them by at most this much.
+	Lease = 10 * time.Minute
 )
 
 // LocalDomain is a Domain this Server is authoritative for.
@@ -215,6 +220,10 @@ type Service struct {
 	deliveryClient  *http.Client
 
 	deliverer Deliverer
+
+	// worker names this process in the outbox leases it takes, so a row shows
+	// which worker holds it.
+	worker string
 }
 
 // New returns a Service. cfg may be nil, which yields a Service that reports
@@ -223,7 +232,12 @@ func New(db *store.DB, cfg *Config, log *slog.Logger, deliverer Deliverer) (*Ser
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	s := &Service{db: db, cfg: cfg, log: log, deliverer: deliverer, local: map[string]*LocalDomain{}}
+	worker, err := workerName()
+	if err != nil {
+		return nil, err
+	}
+	s := &Service{db: db, cfg: cfg, log: log, deliverer: deliverer, local: map[string]*LocalDomain{},
+		worker: worker}
 	if cfg == nil {
 		return s, nil
 	}
@@ -252,6 +266,24 @@ func New(db *store.DB, cfg *Config, log *slog.Logger, deliverer Deliverer) (*Ser
 		Transport: transport, CheckRedirect: noRedirect, Timeout: 30 * time.Second,
 	}
 	return s, nil
+}
+
+// workerName is the host name and a random suffix, short enough for the
+// claimed_by column. The suffix tells apart two workers on one host.
+func workerName() (string, error) {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "worker"
+	}
+	suffix, err := NewNonce()
+	if err != nil {
+		return "", err
+	}
+	name := host + "/" + suffix
+	if len(name) > 64 {
+		name = name[len(name)-64:]
+	}
+	return name, nil
 }
 
 // peerTLSConfig builds the TLS settings for peer connections. TLS 1.2 is the
@@ -358,11 +390,12 @@ func (s *Service) Peer(ctx context.Context, domain string, force bool) (*Descrip
 	if err != nil {
 		return nil, err
 	}
-	fresh := cached != nil && !discoveredAt.IsZero() && time.Since(discoveredAt) < RefreshInterval
+	now := s.db.Now()
+	fresh := cached != nil && !discoveredAt.IsZero() && now.Sub(discoveredAt) < RefreshInterval
 	if fresh && !force {
 		return cached, nil
 	}
-	if cached == nil && !force && !failedAt.IsZero() && time.Since(failedAt) < FailureBackoff {
+	if cached == nil && !force && !failedAt.IsZero() && now.Sub(failedAt) < FailureBackoff {
 		return nil, fmt.Errorf("discovery of %s failed recently; not re-probing yet", domain)
 	}
 
@@ -392,9 +425,9 @@ func (s *Service) cachedPeer(ctx context.Context, domain string) (*Descriptor, t
 		discoveredAt, failedAt        sql.NullTime
 	)
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `public_key`, `previous_public_keys`, `versions`, `is_registrar`, "+
-			"`max_envelope_bytes`, `max_attachment_bytes`, `discovered_at`, `discovery_failed_at` "+
-			"FROM `domain` WHERE `name` = ? AND `is_local` = 0 LIMIT 1", domain).
+		`SELECT "public_key", "previous_public_keys", "versions", "is_registrar", `+
+			`"max_envelope_bytes", "max_attachment_bytes", "discovered_at", "discovery_failed_at" `+
+			`FROM "domain" WHERE "name" = ? AND "is_local" = FALSE LIMIT 1`, domain).
 		Scan(&publicKey, &previous, &versions, &registrar, &envelopeCap, &attachmentCap,
 			&discoveredAt, &failedAt)
 	if err == sql.ErrNoRows {
@@ -422,16 +455,16 @@ func (s *Service) cachedPeer(ctx context.Context, domain string) (*Descriptor, t
 // pinned key authenticates every envelope regardless of what the CA does later.
 func (s *Service) storePeer(ctx context.Context, d *Descriptor) error {
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO `domain` (`name`, `is_local`, `public_key`, `previous_public_keys`, `versions`, "+
-			"`is_registrar`, `max_envelope_bytes`, `max_attachment_bytes`, `discovered_at`) "+
-			"VALUES (?,0,?,?,?,?,?,?,NOW()) "+
-			"ON DUPLICATE KEY UPDATE `public_key` = VALUES(`public_key`), "+
-			"`previous_public_keys` = VALUES(`previous_public_keys`), `versions` = VALUES(`versions`), "+
-			"`is_registrar` = VALUES(`is_registrar`), `max_envelope_bytes` = VALUES(`max_envelope_bytes`), "+
-			"`max_attachment_bytes` = VALUES(`max_attachment_bytes`), `discovered_at` = NOW(), "+
-			"`discovery_failed_at` = NULL",
+		`INSERT INTO "domain" ("name", "is_local", "public_key", "previous_public_keys", "versions", `+
+			`"is_registrar", "max_envelope_bytes", "max_attachment_bytes", "discovered_at") `+
+			"VALUES (?,FALSE,?,?,?,?,?,?,?) "+
+			`ON CONFLICT ("name") DO UPDATE SET "public_key" = "excluded"."public_key", `+
+			`"previous_public_keys" = "excluded"."previous_public_keys", "versions" = "excluded"."versions", `+
+			`"is_registrar" = "excluded"."is_registrar", "max_envelope_bytes" = "excluded"."max_envelope_bytes", `+
+			`"max_attachment_bytes" = "excluded"."max_attachment_bytes", `+
+			`"discovered_at" = "excluded"."discovered_at", "discovery_failed_at" = NULL`,
 		d.Domain, d.PublicKey, strings.Join(d.PreviousPublicKeys, ","), strings.Join(d.Versions, ","),
-		d.Registrar, d.EnvelopeCap(), d.AttachmentCap())
+		d.Registrar, d.EnvelopeCap(), d.AttachmentCap(), s.db.Now())
 	if err != nil {
 		return fmt.Errorf("cache peer %s: %w", d.Domain, err)
 	}
@@ -440,8 +473,9 @@ func (s *Service) storePeer(ctx context.Context, d *Descriptor) error {
 
 func (s *Service) recordDiscoveryFailure(ctx context.Context, domain string) {
 	if _, err := s.db.ExecContext(ctx,
-		"INSERT INTO `domain` (`name`, `is_local`, `discovery_failed_at`) VALUES (?,0,NOW()) "+
-			"ON DUPLICATE KEY UPDATE `discovery_failed_at` = NOW()", domain); err != nil {
+		`INSERT INTO "domain" ("name", "is_local", "discovery_failed_at") VALUES (?,FALSE,?) `+
+			`ON CONFLICT ("name") DO UPDATE SET "discovery_failed_at" = "excluded"."discovery_failed_at"`,
+		domain, s.db.Now()); err != nil {
 		s.log.Warn("could not record a discovery failure", "domain", domain, "error", err)
 	}
 }
@@ -457,11 +491,12 @@ func (s *Service) RegisterLocalDomains(ctx context.Context) error {
 			customerID = d.CustomerID
 		}
 		if _, err := s.db.ExecContext(ctx,
-			"INSERT INTO `domain` (`name`, `customer_id`, `is_local`, `public_key`, `versions`, `discovered_at`) "+
-				"VALUES (?,?,1,?,?,NOW()) "+
-				"ON DUPLICATE KEY UPDATE `customer_id` = VALUES(`customer_id`), `is_local` = 1, "+
-				"`public_key` = VALUES(`public_key`), `versions` = VALUES(`versions`), `discovered_at` = NOW()",
-			d.Domain, customerID, public, Version); err != nil {
+			`INSERT INTO "domain" ("name", "customer_id", "is_local", "public_key", "versions", "discovered_at") `+
+				"VALUES (?,?,TRUE,?,?,?) "+
+				`ON CONFLICT ("name") DO UPDATE SET "customer_id" = "excluded"."customer_id", "is_local" = TRUE, `+
+				`"public_key" = "excluded"."public_key", "versions" = "excluded"."versions", `+
+				`"discovered_at" = "excluded"."discovered_at"`,
+			d.Domain, customerID, public, Version, s.db.Now()); err != nil {
 			return fmt.Errorf("register local domain %s: %w", d.Domain, err)
 		}
 	}

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/mevdschee/webmail-server/internal/federation"
 	"github.com/mevdschee/webmail-server/internal/mdconv"
@@ -48,7 +47,7 @@ func (s *Service) federate(ctx context.Context, tx *sql.Tx, gThreadID, gMessageI
 		return err
 	}
 	subject, err := store.SelectString(ctx, tx,
-		"SELECT `subject_line` FROM `g_thread` WHERE `id` = ? LIMIT 1", gThreadID)
+		`SELECT "subject_line" FROM "g_thread" WHERE "id" = ? LIMIT 1`, gThreadID)
 	if err != nil {
 		return fmt.Errorf("look up subject: %w", err)
 	}
@@ -59,7 +58,7 @@ func (s *Service) federate(ctx context.Context, tx *sql.Tx, gThreadID, gMessageI
 	// start a fresh thread instead (RFC 5.3).
 	inReplyTo := ""
 	priorMessages, err := store.SelectInt(ctx, tx,
-		"SELECT COUNT(*) FROM `g_message` WHERE `g_thread_id` = ?", gThreadID)
+		`SELECT COUNT(*) FROM "g_message" WHERE "g_thread_id" = ?`, gThreadID)
 	if err != nil {
 		return fmt.Errorf("count thread messages: %w", err)
 	}
@@ -90,7 +89,7 @@ func (s *Service) federate(ctx context.Context, tx *sql.Tx, gThreadID, gMessageI
 			SenderName:   sender.Name,
 			Body:         body,
 			BodyHTML:     bodyHTML,
-			SentAt:       time.Now().UTC(),
+			SentAt:       s.db.Now(),
 			// The full subscriber list, not just this Domain's share: the peer
 			// needs the whole set to reproduce the thread's membership, and
 			// delivers only to the addresses it is authoritative for.
@@ -134,7 +133,7 @@ func (s *Service) federationID(ctx context.Context, tx *sql.Tx, table string, id
 	// table is not user input: it is one of two literals chosen by the caller.
 	var existing sql.NullString
 	err := tx.QueryRowContext(ctx,
-		"SELECT `federation_id` FROM `"+table+"` WHERE `id` = ? LIMIT 1", id).Scan(&existing)
+		`SELECT "federation_id" FROM "`+table+`" WHERE "id" = ? LIMIT 1`, id).Scan(&existing)
 	if err != nil {
 		return "", fmt.Errorf("look up %s federation id: %w", table, err)
 	}
@@ -146,7 +145,7 @@ func (s *Service) federationID(ctx context.Context, tx *sql.Tx, table string, id
 		return "", err
 	}
 	if _, err := tx.ExecContext(ctx,
-		"UPDATE `"+table+"` SET `federation_id` = ? WHERE `id` = ?", fedID, id); err != nil {
+		`UPDATE "`+table+`" SET "federation_id" = ? WHERE "id" = ?`, fedID, id); err != nil {
 		return "", fmt.Errorf("assign %s federation id: %w", table, err)
 	}
 	return fedID, nil
@@ -160,7 +159,7 @@ func (s *Service) federatedAttachments(ctx context.Context, tx *sql.Tx, gMessage
 		return nil, nil
 	}
 	rows, err := tx.QueryContext(ctx,
-		"SELECT `id`, `file_name` FROM `g_attachment` WHERE `g_message_id` = ? ORDER BY `id`", gMessageID)
+		`SELECT "id", "file_name" FROM "g_attachment" WHERE "g_message_id" = ? ORDER BY "id"`, gMessageID)
 	if err != nil {
 		return nil, fmt.Errorf("list attachments to federate: %w", err)
 	}

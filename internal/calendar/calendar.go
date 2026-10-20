@@ -89,8 +89,8 @@ func rfc3339(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05-07
 // ListCalendars returns the customer's calendars.
 func (s *Service) ListCalendars(ctx context.Context, customerID int64) ([]Calendar, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT `id`, `name`, `color`, `user_id` FROM `mailbox` "+
-			"WHERE `customer_id` = ? AND `deleted_at` IS NULL ORDER BY `id`", customerID)
+		`SELECT "id", "name", "color", "user_id" FROM "mailbox" `+
+			`WHERE "customer_id" = ? AND "deleted_at" IS NULL ORDER BY "id"`, customerID)
 	if err != nil {
 		return nil, fmt.Errorf("list calendars: %w", err)
 	}
@@ -131,14 +131,14 @@ func (s *Service) ListMeetings(ctx context.Context, customerID int64, calendarID
 	in := store.Placeholders(len(calendarIDs))
 	args := append([]any{customerID, from, until}, store.Args(calendarIDs)...)
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT `meeting`.`id`, `meeting`.`mailbox_id`, `meeting`.`will_attend`, "+
-			"`g_meeting`.`title`, `g_meeting`.`start_time`, `g_meeting`.`end_time`, "+
-			"`g_meeting`.`time_zone`, `g_meeting`.`is_all_day`, `g_meeting`.`organizer_email`, "+
-			"`g_meeting`.`organizer_name`, `g_meeting`.`description` FROM `meeting` "+
-			"JOIN `g_meeting` ON `meeting`.`g_meeting_id` = `g_meeting`.`id` "+
-			"WHERE `meeting`.`customer_id` = ? AND `g_meeting`.`start_time` >= ? "+
-			"AND `g_meeting`.`start_time` < ? AND `meeting`.`mailbox_id` IN ("+in+") "+
-			"ORDER BY `g_meeting`.`start_time`", args...)
+		`SELECT "meeting"."id", "meeting"."mailbox_id", "meeting"."will_attend", `+
+			`"g_meeting"."title", "g_meeting"."start_time", "g_meeting"."end_time", `+
+			`"g_meeting"."time_zone", "g_meeting"."is_all_day", "g_meeting"."organizer_email", `+
+			`"g_meeting"."organizer_name", "g_meeting"."description" FROM "meeting" `+
+			`JOIN "g_meeting" ON "meeting"."g_meeting_id" = "g_meeting"."id" `+
+			`WHERE "meeting"."customer_id" = ? AND "g_meeting"."start_time" >= ? `+
+			`AND "g_meeting"."start_time" < ? AND "meeting"."mailbox_id" IN (`+in+") "+
+			`ORDER BY "g_meeting"."start_time"`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list meetings: %w", err)
 	}
@@ -281,6 +281,11 @@ func (s *Service) AddMeeting(ctx context.Context, customerID, calendarID int64, 
 	if err != nil {
 		return 0, fmt.Errorf("parse repeat rule: %w", err)
 	}
+	attendees := make([]string, len(in.Attendees))
+	for i, email := range in.Attendees {
+		attendees[i] = store.Address(email)
+	}
+	in.Attendees = attendees
 
 	var meetingID int64
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
@@ -294,8 +299,8 @@ func (s *Service) AddMeeting(ctx context.Context, customerID, calendarID int64, 
 
 		humanReadable := rule.HumanReadable()
 		gScheduleID, err := store.Insert(ctx, tx,
-			"INSERT INTO `g_schedule` (`start_time`, `end_time`, `time_zone`, `repeat_rule`, "+
-				"`recurrence_dates`, `exception_dates`, `repeat_rule_human_readable`) VALUES (?,?,?,?,?,?,?)",
+			`INSERT INTO "g_schedule" ("start_time", "end_time", "time_zone", "repeat_rule", `+
+				`"recurrence_dates", "exception_dates", "repeat_rule_human_readable") VALUES (?,?,?,?,?,?,?)`,
 			in.StartTime, in.EndTime, in.TimeZone, in.RepeatRule, "", "", humanReadable)
 		if err != nil {
 			return fmt.Errorf("create schedule: %w", err)
@@ -330,18 +335,18 @@ func (s *Service) AddMeeting(ctx context.Context, customerID, calendarID int64, 
 func (s *Service) addOccurrence(ctx context.Context, tx *sql.Tx, gScheduleID int64,
 	organizer identity, in NewMeeting, start, end time.Time, description string) (int64, error) {
 	gMeetingID, err := store.Insert(ctx, tx,
-		"INSERT INTO `g_meeting` (`g_schedule`, `title`, `start_time`, `end_time`, `time_zone`, "+
-			"`is_all_day`, `organizer_email`, `organizer_name`, `description`, `description_html`, "+
-			"`created_at`) VALUES (?,?,?,?,?,?,?,?,?,?,NOW())",
+		`INSERT INTO "g_meeting" ("g_schedule", "title", "start_time", "end_time", "time_zone", `+
+			`"is_all_day", "organizer_email", "organizer_name", "description", "description_html", `+
+			`"created_at") VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		gScheduleID, in.Title, start, end, in.TimeZone, in.IsAllDay,
-		organizer.Email, organizer.Name, description, in.DescriptionHTML)
+		organizer.Email, organizer.Name, description, in.DescriptionHTML, s.db.Now())
 	if err != nil {
 		return 0, fmt.Errorf("create meeting: %w", err)
 	}
 
 	// The organizer attends their own meeting.
 	if _, err := tx.ExecContext(ctx,
-		"INSERT INTO `g_attendee` (`g_meeting_id`, `email`, `will_attend`) VALUES (?,?,'yes')",
+		`INSERT INTO "g_attendee" ("g_meeting_id", "email", "will_attend") VALUES (?,?,'yes')`,
 		gMeetingID, organizer.Email); err != nil {
 		return 0, fmt.Errorf("add organizer as attendee: %w", err)
 	}
@@ -350,7 +355,7 @@ func (s *Service) addOccurrence(ctx context.Context, tx *sql.Tx, gScheduleID int
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO `g_attendee` (`g_meeting_id`, `email`) VALUES (?,?)",
+			`INSERT INTO "g_attendee" ("g_meeting_id", "email") VALUES (?,?)`,
 			gMeetingID, email); err != nil {
 			return 0, fmt.Errorf("add attendee %s: %w", email, err)
 		}
@@ -363,7 +368,7 @@ func (s *Service) addOccurrence(ctx context.Context, tx *sql.Tx, gScheduleID int
 			continue
 		}
 		mailboxID, err := store.SelectInt(ctx, tx,
-			"SELECT `mailbox_id` FROM `alias` WHERE `email` = ? LIMIT 1", email)
+			`SELECT "mailbox_id" FROM "alias" WHERE "email" = ? LIMIT 1`, email)
 		if err != nil {
 			return 0, fmt.Errorf("look up attendee mailbox: %w", err)
 		}
@@ -372,7 +377,7 @@ func (s *Service) addOccurrence(ctx context.Context, tx *sql.Tx, gScheduleID int
 		}
 		projected[mailboxID] = true
 		attendeeCustomerID, err := store.SelectInt(ctx, tx,
-			"SELECT `customer_id` FROM `mailbox` WHERE `id` = ? LIMIT 1", mailboxID)
+			`SELECT "customer_id" FROM "mailbox" WHERE "id" = ? LIMIT 1`, mailboxID)
 		if err != nil {
 			return 0, fmt.Errorf("look up attendee customer: %w", err)
 		}
@@ -384,7 +389,7 @@ func (s *Service) addOccurrence(ctx context.Context, tx *sql.Tx, gScheduleID int
 		var willAttend any
 		if email == organizer.Email {
 			id, err := store.Insert(ctx, tx,
-				"INSERT INTO `schedule` (`customer_id`, `g_schedule_id`, `mailbox_id`) VALUES (?,?,?)",
+				`INSERT INTO "schedule" ("customer_id", "g_schedule_id", "mailbox_id") VALUES (?,?,?)`,
 				attendeeCustomerID, gScheduleID, mailboxID)
 			if err != nil {
 				return 0, fmt.Errorf("create schedule projection: %w", err)
@@ -393,7 +398,7 @@ func (s *Service) addOccurrence(ctx context.Context, tx *sql.Tx, gScheduleID int
 			willAttend = "yes"
 		}
 		id, err := store.Insert(ctx, tx,
-			"INSERT INTO `meeting` (`customer_id`, `g_meeting_id`, `mailbox_id`, `schedule_id`, `will_attend`) "+
+			`INSERT INTO "meeting" ("customer_id", "g_meeting_id", "mailbox_id", "schedule_id", "will_attend") `+
 				"VALUES (?,?,?,?,?)",
 			attendeeCustomerID, gMeetingID, mailboxID, scheduleID, willAttend)
 		if err != nil {
@@ -414,9 +419,9 @@ type identity struct {
 func senderIdentity(ctx context.Context, q store.Queryer, customerID, mailboxID int64) (identity, error) {
 	var id identity
 	err := q.QueryRowContext(ctx,
-		"SELECT `alias`.`email`, `alias`.`name` FROM `mailbox` "+
-			"JOIN `alias` ON `alias`.`id` = `mailbox`.`default_alias_id` "+
-			"WHERE `mailbox`.`customer_id` = ? AND `mailbox`.`id` = ? LIMIT 1",
+		`SELECT "alias"."email", "alias"."name" FROM "mailbox" `+
+			`JOIN "alias" ON "alias"."id" = "mailbox"."default_alias_id" `+
+			`WHERE "mailbox"."customer_id" = ? AND "mailbox"."id" = ? LIMIT 1`,
 		customerID, mailboxID).Scan(&id.Email, &id.Name)
 	if err == sql.ErrNoRows {
 		return identity{}, nil
@@ -439,7 +444,7 @@ func (s *Service) SetRSVP(ctx context.Context, customerID, meetingID int64, will
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		var gMeetingID, mailboxID int64
 		err := tx.QueryRowContext(ctx,
-			"SELECT `g_meeting_id`, `mailbox_id` FROM `meeting` WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
+			`SELECT "g_meeting_id", "mailbox_id" FROM "meeting" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
 			customerID, meetingID).Scan(&gMeetingID, &mailboxID)
 		if err == sql.ErrNoRows {
 			return nil
@@ -455,12 +460,12 @@ func (s *Service) SetRSVP(ctx context.Context, customerID, meetingID int64, will
 			return nil
 		}
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE `meeting` SET `will_attend` = ? WHERE `customer_id` = ? AND `id` = ?",
+			`UPDATE "meeting" SET "will_attend" = ? WHERE "customer_id" = ? AND "id" = ?`,
 			willAttend, customerID, meetingID); err != nil {
 			return fmt.Errorf("update rsvp projection: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO `g_attendee` (`g_meeting_id`, `email`, `will_attend`) VALUES (?,?,?)",
+			`INSERT INTO "g_attendee" ("g_meeting_id", "email", "will_attend") VALUES (?,?,?)`,
 			gMeetingID, attendee.Email, willAttend); err != nil {
 			return fmt.Errorf("record rsvp: %w", err)
 		}
@@ -474,7 +479,7 @@ func (s *Service) SetRSVP(ctx context.Context, customerID, meetingID int64, will
 // meeting stays for the other attendees.
 func (s *Service) DeleteMeeting(ctx context.Context, customerID, meetingID int64) (bool, error) {
 	n, err := store.Affected(ctx, s.db,
-		"DELETE FROM `meeting` WHERE `customer_id` = ? AND `id` = ? LIMIT 1", customerID, meetingID)
+		`DELETE FROM "meeting" WHERE "customer_id" = ? AND "id" = ?`, customerID, meetingID)
 	if err != nil {
 		return false, fmt.Errorf("delete meeting: %w", err)
 	}
@@ -483,10 +488,11 @@ func (s *Service) DeleteMeeting(ctx context.Context, customerID, meetingID int64
 
 // AddAttendee invites an address to a meeting and gives it a projection.
 func (s *Service) AddAttendee(ctx context.Context, customerID, meetingID int64, email string) (bool, error) {
+	email = store.Address(email)
 	var ok bool
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		gMeetingID, err := store.SelectInt(ctx, tx,
-			"SELECT `g_meeting_id` FROM `meeting` WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
+			`SELECT "g_meeting_id" FROM "meeting" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
 			customerID, meetingID)
 		if err != nil {
 			return fmt.Errorf("look up meeting: %w", err)
@@ -495,38 +501,38 @@ func (s *Service) AddAttendee(ctx context.Context, customerID, meetingID int64, 
 			return nil
 		}
 		existing, err := store.SelectInt(ctx, tx,
-			"SELECT `id` FROM `g_attendee` WHERE `g_meeting_id` = ? AND `email` = ? LIMIT 1",
+			`SELECT "id" FROM "g_attendee" WHERE "g_meeting_id" = ? AND "email" = ? LIMIT 1`,
 			gMeetingID, email)
 		if err != nil {
 			return fmt.Errorf("look up attendee: %w", err)
 		}
 		if existing == 0 {
 			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO `g_attendee` (`g_meeting_id`, `email`) VALUES (?,?)",
+				`INSERT INTO "g_attendee" ("g_meeting_id", "email") VALUES (?,?)`,
 				gMeetingID, email); err != nil {
 				return fmt.Errorf("add attendee: %w", err)
 			}
 		}
 		mailboxID, err := store.SelectInt(ctx, tx,
-			"SELECT `mailbox_id` FROM `alias` WHERE `email` = ? LIMIT 1", email)
+			`SELECT "mailbox_id" FROM "alias" WHERE "email" = ? LIMIT 1`, email)
 		if err != nil {
 			return fmt.Errorf("look up attendee mailbox: %w", err)
 		}
 		if mailboxID != 0 {
 			attendeeCustomerID, err := store.SelectInt(ctx, tx,
-				"SELECT `customer_id` FROM `mailbox` WHERE `id` = ? LIMIT 1", mailboxID)
+				`SELECT "customer_id" FROM "mailbox" WHERE "id" = ? LIMIT 1`, mailboxID)
 			if err != nil {
 				return fmt.Errorf("look up attendee customer: %w", err)
 			}
 			present, err := store.SelectInt(ctx, tx,
-				"SELECT `id` FROM `meeting` WHERE `customer_id` = ? AND `g_meeting_id` = ? LIMIT 1",
+				`SELECT "id" FROM "meeting" WHERE "customer_id" = ? AND "g_meeting_id" = ? LIMIT 1`,
 				attendeeCustomerID, gMeetingID)
 			if err != nil {
 				return fmt.Errorf("look up meeting projection: %w", err)
 			}
 			if attendeeCustomerID != 0 && present == 0 {
 				if _, err := tx.ExecContext(ctx,
-					"INSERT INTO `meeting` (`customer_id`, `g_meeting_id`, `mailbox_id`, `schedule_id`) "+
+					`INSERT INTO "meeting" ("customer_id", "g_meeting_id", "mailbox_id", "schedule_id") `+
 						"VALUES (?,?,?,NULL)",
 					attendeeCustomerID, gMeetingID, mailboxID); err != nil {
 					return fmt.Errorf("create meeting projection: %w", err)
@@ -544,10 +550,10 @@ func (s *Service) GetDocument(ctx context.Context, customerID, documentID int64)
 	var d Document
 	var hash string
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `g_document`.`file_name`, `g_document`.`mime_type`, `g_document`.`file_size`, "+
-			"`g_document`.`hash_md5` FROM `g_document` "+
-			"JOIN `meeting` ON `meeting`.`g_meeting_id` = `g_document`.`g_meeting_id` "+
-			"WHERE `g_document`.`id` = ? AND `meeting`.`customer_id` = ? LIMIT 1",
+		`SELECT "g_document"."file_name", "g_document"."mime_type", "g_document"."file_size", `+
+			`"g_document"."hash_md5" FROM "g_document" `+
+			`JOIN "meeting" ON "meeting"."g_meeting_id" = "g_document"."g_meeting_id" `+
+			`WHERE "g_document"."id" = ? AND "meeting"."customer_id" = ? LIMIT 1`,
 		documentID, customerID).Scan(&d.FileName, &d.MimeType, &d.FileSize, &hash)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -567,7 +573,7 @@ func (s *Service) GetDocument(ctx context.Context, customerID, documentID int64)
 func (s *Service) AddDocument(ctx context.Context, customerID, meetingID int64,
 	fileName, mimeType string, data []byte) (int64, error) {
 	gMeetingID, err := store.SelectInt(ctx, s.db,
-		"SELECT `g_meeting_id` FROM `meeting` WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
+		`SELECT "g_meeting_id" FROM "meeting" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
 		customerID, meetingID)
 	if err != nil {
 		return 0, fmt.Errorf("look up meeting: %w", err)
@@ -580,7 +586,7 @@ func (s *Service) AddDocument(ctx context.Context, customerID, meetingID int64,
 		return 0, err
 	}
 	id, err := store.Insert(ctx, s.db,
-		"INSERT INTO `g_document` (`g_meeting_id`, `file_name`, `mime_type`, `file_size`, `hash_md5`) "+
+		`INSERT INTO "g_document" ("g_meeting_id", "file_name", "mime_type", "file_size", "hash_md5") `+
 			"VALUES (?,?,?,?,?)",
 		gMeetingID, fileName, mimeType, len(data), hash)
 	if err != nil {
@@ -592,9 +598,9 @@ func (s *Service) AddDocument(ctx context.Context, customerID, meetingID int64,
 // DeleteDocument removes a document, if the customer attends its meeting.
 func (s *Service) DeleteDocument(ctx context.Context, customerID, documentID int64) (bool, error) {
 	gMeetingID, err := store.SelectInt(ctx, s.db,
-		"SELECT `g_document`.`g_meeting_id` FROM `g_document` "+
-			"JOIN `meeting` ON `meeting`.`g_meeting_id` = `g_document`.`g_meeting_id` "+
-			"WHERE `g_document`.`id` = ? AND `meeting`.`customer_id` = ? LIMIT 1",
+		`SELECT "g_document"."g_meeting_id" FROM "g_document" `+
+			`JOIN "meeting" ON "meeting"."g_meeting_id" = "g_document"."g_meeting_id" `+
+			`WHERE "g_document"."id" = ? AND "meeting"."customer_id" = ? LIMIT 1`,
 		documentID, customerID)
 	if err != nil {
 		return false, fmt.Errorf("look up document: %w", err)
@@ -602,7 +608,7 @@ func (s *Service) DeleteDocument(ctx context.Context, customerID, documentID int
 	if gMeetingID == 0 {
 		return false, nil
 	}
-	n, err := store.Affected(ctx, s.db, "DELETE FROM `g_document` WHERE `id` = ? LIMIT 1", documentID)
+	n, err := store.Affected(ctx, s.db, `DELETE FROM "g_document" WHERE "id" = ?`, documentID)
 	if err != nil {
 		return false, fmt.Errorf("delete document: %w", err)
 	}

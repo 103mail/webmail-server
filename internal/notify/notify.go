@@ -114,12 +114,12 @@ func (s *Service) lookup(ctx context.Context, name, language string) (*template,
 		sql  string
 		args []any
 	}{
-		{"SELECT `subject`, `body`, `language`, `sender_name`, `sender_email` FROM `email_template` " +
-			"WHERE `name` = ? AND `language` = ? LIMIT 1", []any{name, language}},
-		{"SELECT `subject`, `body`, `language`, `sender_name`, `sender_email` FROM `email_template` " +
-			"WHERE `name` = ? AND `language` = 'en' LIMIT 1", []any{name}},
-		{"SELECT `subject`, `body`, `language`, `sender_name`, `sender_email` FROM `email_template` " +
-			"WHERE `name` = ? LIMIT 1", []any{name}},
+		{`SELECT "subject", "body", "language", "sender_name", "sender_email" FROM "email_template" ` +
+			`WHERE "name" = ? AND "language" = ? LIMIT 1`, []any{name, language}},
+		{`SELECT "subject", "body", "language", "sender_name", "sender_email" FROM "email_template" ` +
+			`WHERE "name" = ? AND "language" = 'en' LIMIT 1`, []any{name}},
+		{`SELECT "subject", "body", "language", "sender_name", "sender_email" FROM "email_template" ` +
+			`WHERE "name" = ? LIMIT 1`, []any{name}},
 	}
 	for _, q := range queries {
 		var t template
@@ -147,16 +147,18 @@ func (s *Service) record(ctx context.Context, customerID *int64, tmpl *template,
 	if customerID != nil {
 		customer = *customerID
 	}
-	// status_message is a varchar(255); a provider error can be longer.
-	if len(statusMessage) > 255 {
-		statusMessage = statusMessage[:255]
+	// status_message is a varchar(255); a provider error can be longer. Cut
+	// on a rune boundary, since PostgreSQL refuses half a UTF-8 sequence.
+	if r := []rune(statusMessage); len(r) > 255 {
+		statusMessage = string(r[:255])
 	}
 	_, err = s.db.ExecContext(ctx,
-		"INSERT INTO `sent_email` (`customer_id`,`from_name`,`from_email`,`to_name`,`to_email`,"+
-			"`preferred_language`,`template_name`,`language`,`parameters`,`bcc_email`,`subject`,"+
-			"`body`,`status`,`status_message`,`created_at`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())",
+		`INSERT INTO "sent_email" ("customer_id","from_name","from_email","to_name","to_email",`+
+			`"preferred_language","template_name","language","parameters","bcc_email","subject",`+
+			`"body","status","status_message","created_at") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		customer, tmpl.SenderName, tmpl.SenderEmail, toName, toEmail, preferredLanguage,
-		templateName, tmpl.Language, string(encoded), bccEmail, subject, body, status, statusMessage)
+		templateName, tmpl.Language, string(encoded), bccEmail, subject, body, status, statusMessage,
+		s.db.Now())
 	if err != nil {
 		return fmt.Errorf("record sent email: %w", err)
 	}

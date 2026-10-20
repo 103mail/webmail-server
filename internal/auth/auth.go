@@ -63,7 +63,7 @@ func (s *Service) Authorize(ctx context.Context, header string) (Identity, error
 	var id Identity
 	var tokenID int64
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `id`, `customer_id`, `user_id` FROM `token` WHERE `value` = ?",
+		`SELECT "id", "customer_id", "user_id" FROM "token" WHERE "value" = ?`,
 		value).Scan(&tokenID, &id.CustomerID, &id.UserID)
 	if err == sql.ErrNoRows {
 		return Identity{}, nil
@@ -72,7 +72,7 @@ func (s *Service) Authorize(ctx context.Context, header string) (Identity, error
 		return Identity{}, fmt.Errorf("look up token: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"UPDATE `token` SET `used_at` = NOW() WHERE `id` = ?", tokenID); err != nil {
+		`UPDATE "token" SET "used_at" = ? WHERE "id" = ?`, s.db.Now(), tokenID); err != nil {
 		return Identity{}, fmt.Errorf("record token use: %w", err)
 	}
 	return id, nil
@@ -92,7 +92,7 @@ func bearer(header string) (string, bool) {
 func (s *Service) CurrentUser(ctx context.Context, id Identity) (*User, error) {
 	var u User
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `id`, `customer_id`, `username`, `name` FROM `user` WHERE `customer_id` = ? AND `id` = ?",
+		`SELECT "id", "customer_id", "username", "name" FROM "user" WHERE "customer_id" = ? AND "id" = ?`,
 		id.CustomerID, id.UserID).Scan(&u.UserID, &u.CustomerID, &u.Email, &u.Name)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -109,10 +109,11 @@ func (s *Service) Login(ctx context.Context, name, email, password string) (*Tok
 	if name == "" {
 		name = "Session"
 	}
+	email = store.Address(email)
 	var userID, customerID int64
 	var hash string
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `id`, `customer_id`, `password` FROM `user` WHERE `username` = ? LIMIT 1",
+		`SELECT "id", "customer_id", "password" FROM "user" WHERE "username" = ? LIMIT 1`,
 		email).Scan(&userID, &customerID, &hash)
 	if err == sql.ErrNoRows {
 		return nil, ErrInvalidCredentials
@@ -131,7 +132,7 @@ func (s *Service) Login(ctx context.Context, name, email, password string) (*Tok
 	var token *Token
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		tokenID, err := store.SelectInt(ctx, tx,
-			"SELECT `id` FROM `token` WHERE `user_id` = ? AND `name` = ?", userID, name)
+			`SELECT "id" FROM "token" WHERE "user_id" = ? AND "name" = ?`, userID, name)
 		if err != nil {
 			return fmt.Errorf("look up token: %w", err)
 		}
@@ -144,19 +145,19 @@ func (s *Service) Login(ctx context.Context, name, email, password string) (*Tok
 			// the token row that does not exist yet, which cannot work on a
 			// first login because token.customer_id is NOT NULL.
 			tokenID, err = store.Insert(ctx, tx,
-				"INSERT INTO `token` (`customer_id`, `user_id`, `name`, `value`) VALUES (?, ?, ?, ?)",
+				`INSERT INTO "token" ("customer_id", "user_id", "name", "value") VALUES (?, ?, ?, ?)`,
 				customerID, userID, name, value)
 			if err != nil {
 				return fmt.Errorf("create token: %w", err)
 			}
 		}
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE `token` SET `validated_at` = NOW() WHERE `id` = ?", tokenID); err != nil {
+			`UPDATE "token" SET "validated_at" = ? WHERE "id" = ?`, s.db.Now(), tokenID); err != nil {
 			return fmt.Errorf("validate token: %w", err)
 		}
 		var t Token
 		if err := tx.QueryRowContext(ctx,
-			"SELECT `name`, `value` FROM `token` WHERE `id` = ?", tokenID).Scan(&t.Name, &t.Value); err != nil {
+			`SELECT "name", "value" FROM "token" WHERE "id" = ?`, tokenID).Scan(&t.Name, &t.Value); err != nil {
 			return fmt.Errorf("read token: %w", err)
 		}
 		token = &t

@@ -2,8 +2,8 @@
 
 How to bring the local stack up and check by hand that mail, calendar and chat
 actually work. The stack is the one in [deploy/](deploy/): two independent
-Domains, each with its own database, API process, worker, chat proxy and
-hostname. Testing against it is the closest thing to production short of
+Domains, each with its own SQLite database, API process, worker, chat proxy
+and hostname. Testing against it is the closest thing to production short of
 deploying, because it exercises the real client bundle, the real reverse proxy
 and the real WebSocket path rather than a mock.
 
@@ -16,6 +16,7 @@ under [Automated tests](#automated-tests).
 | --- | --- |
 | Docker with the compose plugin | Everything runs in containers |
 | `openssl` | `setup.sh` generates the CA, the leaf certificates and the federation keys |
+| `sqlite3` and `python3` | `setup.sh` builds each Domain's database with them |
 | `../webmail-client` | The client bundle is built from it |
 | `../ws2api` | The chat proxy is built from it |
 | A local `webmail` MySQL database | Optional. Seeds the 103mail Domain with real data |
@@ -61,8 +62,9 @@ Then, once per machine:
 
        docker compose up -d --build
 
-Ten containers should come up: a database, an API, a worker and a chat proxy
-per Domain, plus an nginx per Domain. `docker compose ps` shows them.
+Eight containers should come up: an API, a worker, a chat proxy and an nginx
+per Domain. There is no database container; each Domain's database is the file
+`deploy/data/{domain}/webmail.db`, which `setup.sh` built. `docker compose ps` shows them.
 
 ## What the seed data contains
 
@@ -72,7 +74,7 @@ The two Domains are seeded differently on purpose.
 | --- | --- | --- |
 | URL | `https://webmail.103mail.com` | `https://webmail.example.com` |
 | Loopback | `127.0.0.1` | `127.0.0.2` |
-| Seed | data-only dump of your local `webmail` database | fixtures from `deploy/seed.sh` |
+| Seed | data-only dump of your local `webmail` MySQL database, converted for SQLite | fixtures from `deploy/seed.sh` |
 | Logins | whatever that database holds | `bob@example.com`, `carol@example.com` |
 | Password | `password` | `password` |
 
@@ -87,8 +89,10 @@ the same mailbox as `maurits@vdschee.nl`, which is the login. A wrong address
 here answers `403` with a `null` body, which looks like an authorization
 failure rather than a typo. To see what a Domain will accept:
 
-    docker compose exec db-103mail mariadb -uwebmail -pwebmail webmail \
-      -e "SELECT id, username FROM user ORDER BY id LIMIT 10"
+    sqlite3 data/103mail.com/webmail.db 'SELECT id, username FROM "user" ORDER BY id LIMIT 10'
+
+Addresses are stored and compared in lowercase (ADR 19), so the case you type
+a login in does not matter.
 
 The generated fixtures give each Domain one Customer per account, and per
 account a mailbox (which is also that account's calendar), an Inbox folder and
@@ -155,8 +159,8 @@ Mail is the section the client opens on.
 
 1. **The thread list loads.** The Inbox shows `Welcome to example.com`, with the
    subject in bold and an unread count, because the first message is unread and
-   the second is not. An empty list means the seed did not load; check
-   `docker compose logs db-example` for the init scripts.
+   the second is not. An empty list means the seed did not load; rebuild
+   the database with `./setup.sh --reseed` and read what it reports.
 
 2. **Reading marks read.** Open the thread. Both messages render, oldest first,
    the older one from the peer Domain and the newer from bob. The unread mark
@@ -233,8 +237,8 @@ the default view has content.
    created at 10:00 Amsterdam is stored as 08:00 UTC. Check that the stored
    value is UTC and the displayed value is local:
 
-       docker compose exec db-example mariadb -uwebmail -pwebmail webmail \
-         -e "SELECT id, title, start_time, time_zone FROM g_meeting ORDER BY id DESC LIMIT 3"
+       sqlite3 data/example.com/webmail.db \
+         "SELECT id, title, start_time, time_zone FROM g_meeting ORDER BY id DESC LIMIT 3"
 
 5. **All-day.** Create one with all-day set. It renders in the all-day band and
    does not occupy a time slot.
@@ -339,8 +343,8 @@ other exactly as it would on the internet.
 
 2. Watch the outbox drain:
 
-       docker compose exec db-example mariadb -uwebmail -pwebmail webmail \
-         -e "SELECT peer_domain, status, attempts, last_http_status FROM federation_outbox"
+       sqlite3 data/example.com/webmail.db \
+         "SELECT peer_domain, status, attempts, last_http_status FROM federation_outbox"
        docker compose logs -f worker-example
 
    Status should reach delivered with `last_http_status` 200.
@@ -421,26 +425,24 @@ database holds. Read them from `GET /email/mailbox/{customerId}` and work down.
 
 ## Resetting between runs
 
-Manual testing writes rows. To get back to a known state:
+Manual testing writes rows. To get back to a known state, rebuild the seed SQL
+and the databases with the stack stopped:
 
-    docker compose down -v          # also drops the databases
-    docker compose up -d            # reseeds from scratch on first start
-
-The seed SQL is only applied to an empty database, so `down` without `-v` keeps
-everything you created.
-
-To change what the fixtures contain, edit `deploy/seed.sh` and rebuild the SQL,
-then recreate the volumes so it is applied:
-
+    docker compose down
     ./setup.sh --reseed
-    docker compose down -v && docker compose up -d
+    docker compose up -d
 
-Never edit `seed/example.com.sql` directly. It is generated, and `--reseed`
+The databases are files, so `down` on its own keeps everything you created. To
+reset one Domain only, delete its `data/{domain}/webmail.db` and run
+`./setup.sh`, which builds whatever database is missing.
+
+To change what the fixtures contain, edit `deploy/seed.sh` and reseed. Never
+edit `seed/example.com.sqlite.sql` directly. It is generated, and `--reseed`
 overwrites it.
 
-`seed/103mail.com.sql` is a `mysqldump` of your local `webmail` database taken
-at setup time. `--reseed` re-dumps it, which is how you pull in newer data from
-the PHP side.
+`seed/103mail.com.sqlite.sql` is converted from a `mysqldump` of your local
+`webmail` database taken at setup time. `--reseed` re-dumps it, which is how
+you pull in newer data from the PHP side.
 
 ## Troubleshooting
 
@@ -459,8 +461,7 @@ does not, because it reuses the existing container:
 
     docker compose up -d --force-recreate --no-deps web-103mail web-example
 
-`--no-deps` keeps it off the databases so the seeded data survives. The same
-applies after any branch switch while the stack is up. The `api-*` and
+`--no-deps` leaves the other containers alone. The same applies after any branch switch while the stack is up. The `api-*` and
 `worker-*` containers mount `federation.json` as a single file rather than a
 directory, so they fail silently instead: they go on serving the old file's
 contents with no error. Recreate them too if the file changed.
@@ -497,16 +498,22 @@ webhook answers `503`. The local stack cannot mail a real person.
 
     go test ./...
 
-The suite covers the logic that does not need a database: HTML to markdown
-conversion, recurrence expansion, the day-view layout, content-addressed
-storage, request parsing, MIME rendering and parsing with SNS signature
-verification, and the federation protocol's signing, envelope validation and
-refusal rules.
+The suite covers HTML to markdown conversion, recurrence expansion, the
+day-view layout, content-addressed storage, request parsing, MIME rendering and
+parsing with SNS signature verification, and the federation protocol's
+signing, envelope validation and refusal rules. The domain packages (`auth`,
+`email`, `calendar`, `chat`, `notify`, `federation`) are tested against a real
+SQLite database per test, which covers the projection rules, search, the chat
+session claim and the outbox leases.
 
-It is deliberately narrow. `internal/auth`, `internal/chat`, `internal/config`
-and `internal/wsbridge` have no tests at all, which is why the manual passes
-above are the real gate for chat in particular. Projection rules and end-to-end
-flows are not covered either.
+The same tests run against PostgreSQL, the production engine, when given a
+server to create a schema per test in (ADR 19):
+
+    WEBMAIL_TEST_POSTGRES_DSN=postgres://postgres:secret@localhost/webmail_test go test ./...
+
+`internal/config` and `internal/wsbridge` still have no tests, and the socket
+path is not covered, which is why the manual passes above are the real gate for
+chat in particular.
 
 Before committing, the same gate the PHP repo applies at phpstan level 5:
 
@@ -515,7 +522,8 @@ Before committing, the same gate the PHP repo applies at phpstan level 5:
 
 Both should print nothing.
 
-For verification against the implementation being replaced, run this server and
-the PHP backend against the same database and compare responses. Every shared
-endpoint returns byte-identical JSON, with the calendar the sole exception
-because the PHP implementation of it does not run.
+For verification against the implementation being replaced, run the PHP
+backend on its MySQL database and this server on a PostgreSQL copy of it, and
+compare responses (ADR 19). Every shared endpoint should return byte-identical
+JSON, with the calendar the sole exception because the PHP implementation of it
+does not run.

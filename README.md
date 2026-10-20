@@ -1,15 +1,19 @@
 # webmail-server
 
 Go backend for the webmail platform. It serves the JSON API defined by the
-OpenAPI specification in `../webmail/web/openapi/v1/` and runs against the same
-database as the PHP monolith at `../webmail`, so the two can be swapped or run
-side by side. See [CLAUDE.md](CLAUDE.md) for the conventions and
-[docs/adr/](docs/adr/) for the decisions behind them.
+OpenAPI specification in `../webmail/web/openapi/v1/` and replaces the PHP
+monolith at `../webmail`. It runs on PostgreSQL in production and on SQLite in
+every test environment (ADR 19), while the PHP backend runs on MySQL, so the
+cutover moves the data as well. See [CLAUDE.md](CLAUDE.md) for the conventions
+and [docs/adr/](docs/adr/) for the decisions behind them.
 
 ## Running
 
     go build ./cmd/webmail-server
     ./webmail-server
+
+With no configuration it serves from `data/webmail.db`, an SQLite file it
+creates, schema included, on first start.
 
 For a full local stack instead, `deploy/` brings up two independent Domains
 (`webmail.103mail.com` and `webmail.example.com`), each with its own database,
@@ -26,14 +30,13 @@ Configuration comes from the environment:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `WEBMAIL_ADDR` | `:8080` | Listen address |
-| `WEBMAIL_DSN` | `webmail:webmail@tcp(127.0.0.1:3306)/webmail` | MySQL connection |
+| `WEBMAIL_DSN` | `sqlite://data/webmail.db` | Database: `postgres://user:pass@host/db` or `sqlite:///path/to/file.db` |
 | `WEBMAIL_DATA_DIR` | `data` | Attachment and document bytes |
 | `WEBMAIL_ALLOWED_ORIGINS` | localhost and 103mail.com | CORS origins, comma separated |
 | `WEBMAIL_MAX_BODY_BYTES` | `33554432` | Request body cap |
 
-`WEBMAIL_DATA_DIR` must point at the same directory the PHP backend uses while
-both are in service. Attachments are content-addressed by MD5 in the same
-four-level layout, so they interoperate without copying.
+Attachments are content-addressed by MD5 in the same four-level layout the PHP
+backend uses, so its `data/attachments` directory carries over without copying.
 
 ## API
 
@@ -60,17 +63,29 @@ by the ClientId alone and therefore reachable only from inside the deployment
 
 ## Database
 
-`schema/webmail.sql` is the authoritative DDL and `schema/webmail.dbml` the
-readable model of it. To create a database:
+`schema/webmail.dbml` is the schema. `schema/generate.sh` renders it into
+`webmail.postgresql.sql` and `webmail.sqlite.sql`, which are checked in and
+embedded in the binary, and the full-text search indexes, which DBML cannot
+describe, are in `search.postgresql.sql` and `search.sqlite.sql`. The server
+applies both to an empty database when it starts, and leaves a database that
+already has tables alone. `schema/webmail.sql` is the MySQL schema the PHP
+backend runs on, kept for the cutover.
 
-    mysql -u root -p < create.sql
-    mysql -u webmail -p webmail < schema/webmail.sql
+The code writes one SQL dialect both engines accept: ANSI quoted identifiers,
+`?` placeholders, times passed in from Go, `ON CONFLICT` and `RETURNING`.
+`internal/store` is the only place the engines differ. ADR 19 has the details,
+including the rules the dialect cannot express: addresses are stored
+lowercase, and times are UTC.
 
-A database created before the calendaring work is brought up to date with
-`dbml-tools migrate`, which compares the live schema against
-`schema/webmail.dbml` and writes the SQL to close the gap. Read what it
-generates before running it: the calendar work changes the type of
-`g_attendee.will_attend`.
+To run on PostgreSQL, create the role and an empty database, and point the
+server at it:
+
+    sudo -u postgres psql < create.sql
+    WEBMAIL_DSN=postgres://webmail:webmail@localhost/webmail ./webmail-server
+
+Schema changes to an existing database go through `dbml-tools migrate`, which
+compares the live schema against `schema/webmail.dbml` and writes the SQL to
+close the gap. Read what it generates before running it.
 
 ## Federation
 
@@ -145,13 +160,24 @@ and federation. It is the real gate for chat, which has no automated coverage.
 
     go test ./...
 
-The suite covers the logic that does not need a database: HTML to markdown
-conversion, recurrence expansion, the day-view layout, content-addressed
-storage, request parsing, MIME rendering and parsing with SNS signature
-verification, and the federation protocol's signing, envelope validation and
-refusal rules.
+The suite covers HTML to markdown conversion, recurrence expansion, the
+day-view layout, content-addressed storage, request parsing, MIME rendering and
+parsing with SNS signature verification, and the federation protocol's
+signing, envelope validation and refusal rules. The domain packages are tested
+against a real database: each test gets a fresh SQLite file with the full
+schema, foreign keys enforced, from `internal/store/storetest`.
 
-For end-to-end verification, run this server and the PHP backend against the
-same database and compare responses. That is how the port was checked: every
-shared endpoint returns byte-identical JSON, with the calendar the sole
-exception because the PHP implementation of it does not run. See ADR 14.
+The same tests run against PostgreSQL when given a server to create their
+schemas in. Each test gets a schema of its own, dropped when it ends:
+
+    WEBMAIL_TEST_POSTGRES_DSN=postgres://postgres:secret@localhost/webmail_test go test ./...
+
+That is the check that the portable dialect really is portable, and ADR 19
+recommends running it before each release.
+
+The port was checked by running this server and the PHP backend against the
+same MySQL database and comparing responses: every shared endpoint returned
+byte-identical JSON, with the calendar the sole exception because the PHP
+implementation of it does not run (ADR 14). Now that the engines differ, the
+same comparison is made between the PHP backend on MySQL and this one on a
+PostgreSQL copy of the data, as ADR 19 describes for the cutover.

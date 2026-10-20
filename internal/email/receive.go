@@ -26,6 +26,13 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 	// Only the addresses this Server is authoritative for. The envelope names
 	// the whole subscriber set so the thread's membership is complete, but a
 	// Domain delivers to its own recipients and no one else's.
+	in.SenderEmail = store.Address(in.SenderEmail)
+	recipients := make([]string, len(in.Recipients))
+	for i, address := range in.Recipients {
+		recipients[i] = store.Address(address)
+	}
+	in.Recipients = recipients
+
 	var mine []string
 	for _, address := range in.Recipients {
 		if s.isLocal(address) {
@@ -50,7 +57,7 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 		// already here, a retry that raced the dedup record still cannot
 		// duplicate it.
 		existing, err := store.SelectInt(ctx, tx,
-			"SELECT `id` FROM `g_message` WHERE `federation_id` = ? LIMIT 1", in.MessageFedID)
+			`SELECT "id" FROM "g_message" WHERE "federation_id" = ? LIMIT 1`, in.MessageFedID)
 		if err != nil {
 			return fmt.Errorf("look up federated message: %w", err)
 		}
@@ -65,14 +72,14 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 		}
 		summary := mdconv.Summary(body)
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE `g_thread` SET `body_summary` = ?, `updated_at` = ? WHERE `id` = ? LIMIT 1",
+			`UPDATE "g_thread" SET "body_summary" = ?, "updated_at" = ? WHERE "id" = ?`,
 			summary, in.SentAt, gThreadID); err != nil {
 			return fmt.Errorf("update thread summary: %w", err)
 		}
 
 		gMessageID, err := store.Insert(ctx, tx,
-			"INSERT INTO `g_message` (`g_thread_id`, `sender_email`, `sender_name`, `body`, "+
-				"`body_html`, `created_at`, `sent_at`, `federation_id`) VALUES (?,?,?,?,?,?,?,?)",
+			`INSERT INTO "g_message" ("g_thread_id", "sender_email", "sender_name", "body", `+
+				`"body_html", "created_at", "sent_at", "federation_id") VALUES (?,?,?,?,?,?,?,?)`,
 			gThreadID, in.SenderEmail, in.SenderName, body, in.BodyHTML,
 			in.SentAt, in.SentAt, in.MessageFedID)
 		if err != nil {
@@ -86,12 +93,8 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 
 		// The subscriber set is the whole envelope's recipient list plus the
 		// sender, so that a reply from here reaches everyone on the thread,
-		// including the subscribers who live on other Domains.
-		//
-		// Deduplicated here rather than left to INSERT IGNORE: g_subscription
-		// carries no unique index on (g_thread_id, email), so IGNORE only
-		// suppresses errors, it does not suppress duplicate rows. The sender is
-		// normally also in the recipient list, so this would double them.
+		// including the subscribers who live on other Domains. The sender is
+		// normally also in the recipient list.
 		if err := s.subscribeAll(ctx, tx, gThreadID,
 			append([]string{in.SenderEmail}, in.Recipients...)); err != nil {
 			return err
@@ -122,26 +125,15 @@ func (s *Service) DeliverInbound(ctx context.Context, in federation.Inbound) (in
 }
 
 // subscribeAll adds addresses to a thread's subscriber set, skipping the ones
-// already there. It reads the existing set first because the table has no
-// unique index to lean on.
+// already there. Addresses are lowercase, so the unique index on
+// (g_thread_id, email) is what does the skipping.
 func (s *Service) subscribeAll(ctx context.Context, tx *sql.Tx, gThreadID int64, addresses []string) error {
-	existing, err := store.SelectStrings(ctx, tx,
-		"SELECT `email` FROM `g_subscription` WHERE `g_thread_id` = ?", gThreadID)
-	if err != nil {
-		return fmt.Errorf("list subscribers: %w", err)
-	}
-	seen := make(map[string]bool, len(existing)+len(addresses))
-	for _, address := range existing {
-		seen[strings.ToLower(address)] = true
-	}
 	for _, address := range addresses {
-		key := strings.ToLower(address)
-		if address == "" || seen[key] {
+		if address == "" {
 			continue
 		}
-		seen[key] = true
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO `g_subscription` (`g_thread_id`, `email`) VALUES (?,?)",
+			`INSERT INTO "g_subscription" ("g_thread_id", "email") VALUES (?,?) ON CONFLICT DO NOTHING`,
 			gThreadID, address); err != nil {
 			return fmt.Errorf("subscribe %s: %w", address, err)
 		}
@@ -161,7 +153,7 @@ func (s *Service) inboundThread(ctx context.Context, tx *sql.Tx, in federation.I
 			continue
 		}
 		id, err := store.SelectInt(ctx, tx,
-			"SELECT `id` FROM `g_thread` WHERE `federation_id` = ? LIMIT 1", candidate)
+			`SELECT "id" FROM "g_thread" WHERE "federation_id" = ? LIMIT 1`, candidate)
 		if err != nil {
 			return 0, fmt.Errorf("look up federated thread: %w", err)
 		}
@@ -170,7 +162,7 @@ func (s *Service) inboundThread(ctx context.Context, tx *sql.Tx, in federation.I
 		}
 	}
 	id, err := store.Insert(ctx, tx,
-		"INSERT INTO `g_thread` (`subject_line`, `created_at`, `updated_at`, `federation_id`) "+
+		`INSERT INTO "g_thread" ("subject_line", "created_at", "updated_at", "federation_id") `+
 			"VALUES (?,?,?,?)", in.Subject, in.SentAt, in.SentAt, in.ThreadFedID)
 	if err != nil {
 		return 0, fmt.Errorf("create federated thread: %w", err)
@@ -184,7 +176,7 @@ func (s *Service) inboundThread(ctx context.Context, tx *sql.Tx, in federation.I
 func (s *Service) projectInbound(ctx context.Context, tx *sql.Tx, gThreadID, gMessageID int64,
 	gAttachmentIDs []int64, address string, sender identity) (bool, error) {
 	mailboxID, err := store.SelectInt(ctx, tx,
-		"SELECT `mailbox_id` FROM `alias` WHERE `email` = ? LIMIT 1", address)
+		`SELECT "mailbox_id" FROM "alias" WHERE "email" = ? LIMIT 1`, address)
 	if err != nil {
 		return false, fmt.Errorf("look up recipient mailbox: %w", err)
 	}
@@ -192,12 +184,12 @@ func (s *Service) projectInbound(ctx context.Context, tx *sql.Tx, gThreadID, gMe
 		return false, nil
 	}
 	folderID, err := store.SelectInt(ctx, tx,
-		"SELECT `default_folder_id` FROM `mailbox` WHERE `id` = ? LIMIT 1", mailboxID)
+		`SELECT "default_folder_id" FROM "mailbox" WHERE "id" = ? LIMIT 1`, mailboxID)
 	if err != nil {
 		return false, fmt.Errorf("look up recipient folder: %w", err)
 	}
 	customerID, err := store.SelectInt(ctx, tx,
-		"SELECT `customer_id` FROM `folder` WHERE `id` = ? LIMIT 1", folderID)
+		`SELECT "customer_id" FROM "folder" WHERE "id" = ? LIMIT 1`, folderID)
 	if err != nil {
 		return false, fmt.Errorf("look up recipient customer: %w", err)
 	}
@@ -206,38 +198,38 @@ func (s *Service) projectInbound(ctx context.Context, tx *sql.Tx, gThreadID, gMe
 	}
 
 	threadID, err := store.SelectInt(ctx, tx,
-		"SELECT `id` FROM `thread` WHERE `customer_id` = ? AND `g_thread_id` = ? LIMIT 1",
+		`SELECT "id" FROM "thread" WHERE "customer_id" = ? AND "g_thread_id" = ? LIMIT 1`,
 		customerID, gThreadID)
 	if err != nil {
 		return false, fmt.Errorf("look up recipient thread: %w", err)
 	}
 	if threadID == 0 {
 		threadID, err = store.Insert(ctx, tx,
-			"INSERT INTO `thread` (`customer_id`, `folder_id`, `g_thread_id`) VALUES (?,?,?)",
+			`INSERT INTO "thread" ("customer_id", "folder_id", "g_thread_id") VALUES (?,?,?)`,
 			customerID, folderID, gThreadID)
 		if err != nil {
 			return false, fmt.Errorf("create recipient thread: %w", err)
 		}
 	}
 	projectionID, err := store.Insert(ctx, tx,
-		"INSERT INTO `message` (`customer_id`, `thread_id`, `g_message_id`) VALUES (?,?,?)",
+		`INSERT INTO "message" ("customer_id", "thread_id", "g_message_id") VALUES (?,?,?)`,
 		customerID, threadID, gMessageID)
 	if err != nil {
 		return false, fmt.Errorf("create recipient message: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		"UPDATE `thread` SET `read_at` = NULL WHERE `id` = ?", threadID); err != nil {
+		`UPDATE "thread" SET "read_at" = NULL WHERE "id" = ?`, threadID); err != nil {
 		return false, fmt.Errorf("mark recipient thread unread: %w", err)
 	}
 	for _, gAttachmentID := range gAttachmentIDs {
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO `attachment` (`customer_id`, `message_id`, `g_attachment_id`) VALUES (?,?,?)",
+			`INSERT INTO "attachment" ("customer_id", "message_id", "g_attachment_id") VALUES (?,?,?)`,
 			customerID, projectionID, gAttachmentID); err != nil {
 			return false, fmt.Errorf("create recipient attachment: %w", err)
 		}
 	}
 	if _, err := tx.ExecContext(ctx,
-		"INSERT IGNORE INTO `contact` (`customer_id`, `email`, `name`) VALUES (?,?,?)",
+		`INSERT INTO "contact" ("customer_id", "email", "name") VALUES (?,?,?) ON CONFLICT DO NOTHING`,
 		customerID, sender.Email, sender.Name); err != nil {
 		return false, fmt.Errorf("record sender as contact: %w", err)
 	}
@@ -256,8 +248,8 @@ func (s *Service) storeInboundAttachments(ctx context.Context, tx *sql.Tx, gMess
 			return nil, err
 		}
 		id, err := store.Insert(ctx, tx,
-			"INSERT INTO `g_attachment` (`g_message_id`, `file_name`, `mime_type`, `file_size`, "+
-				"`hash_md5`, `federation_id`) VALUES (?,?,?,?,?,?)",
+			`INSERT INTO "g_attachment" ("g_message_id", "file_name", "mime_type", "file_size", `+
+				`"hash_md5", "federation_id") VALUES (?,?,?,?,?,?)`,
 			gMessageID, sanitizeFileName(a.FileName), a.MimeType, len(a.Data), hash, a.FederationID)
 		if err != nil {
 			return nil, fmt.Errorf("create federated attachment: %w", err)
@@ -281,10 +273,7 @@ func sanitizeFileName(name string) string {
 	if name == "" || name == "." || name == ".." {
 		return "attachment"
 	}
-	if len(name) > 255 {
-		name = name[:255]
-	}
-	return name
+	return truncate(name, 255)
 }
 
 // Bounce writes a delivery failure into the sender's own mailbox, satisfying
@@ -303,9 +292,11 @@ func (s *Service) Bounce(ctx context.Context, b federation.BounceNotice) error {
 			"Recipients: %s\nDestination domain: %s\nReason: %s\nEnvelope: %s\n",
 		strings.Join(b.Recipients, ", "), b.PeerDomain, reason, b.EnvelopeID)
 
+	senderEmail := store.Address(b.SenderEmail)
+	now := s.db.Now()
 	return s.db.Tx(ctx, func(tx *sql.Tx) error {
 		mailboxID, err := store.SelectInt(ctx, tx,
-			"SELECT `mailbox_id` FROM `alias` WHERE `email` = ? LIMIT 1", b.SenderEmail)
+			`SELECT "mailbox_id" FROM "alias" WHERE "email" = ? LIMIT 1`, senderEmail)
 		if err != nil {
 			return fmt.Errorf("look up bounce recipient: %w", err)
 		}
@@ -313,12 +304,12 @@ func (s *Service) Bounce(ctx context.Context, b federation.BounceNotice) error {
 			return fmt.Errorf("cannot bounce to %s: no mailbox", b.SenderEmail)
 		}
 		folderID, err := store.SelectInt(ctx, tx,
-			"SELECT `default_folder_id` FROM `mailbox` WHERE `id` = ? LIMIT 1", mailboxID)
+			`SELECT "default_folder_id" FROM "mailbox" WHERE "id" = ? LIMIT 1`, mailboxID)
 		if err != nil {
 			return fmt.Errorf("look up bounce folder: %w", err)
 		}
 		customerID, err := store.SelectInt(ctx, tx,
-			"SELECT `customer_id` FROM `folder` WHERE `id` = ? LIMIT 1", folderID)
+			`SELECT "customer_id" FROM "folder" WHERE "id" = ? LIMIT 1`, folderID)
 		if err != nil {
 			return fmt.Errorf("look up bounce customer: %w", err)
 		}
@@ -327,31 +318,31 @@ func (s *Service) Bounce(ctx context.Context, b federation.BounceNotice) error {
 		}
 
 		gThreadID, err := store.Insert(ctx, tx,
-			"INSERT INTO `g_thread` (`subject_line`, `body_summary`) VALUES (?,?)",
+			`INSERT INTO "g_thread" ("subject_line", "body_summary") VALUES (?,?)`,
 			truncate("Delivery failed: "+b.Subject, 255), mdconv.Summary(body))
 		if err != nil {
 			return fmt.Errorf("create bounce thread: %w", err)
 		}
 		gMessageID, err := store.Insert(ctx, tx,
-			"INSERT INTO `g_message` (`g_thread_id`, `sender_email`, `sender_name`, `body`, "+
-				"`created_at`, `sent_at`) VALUES (?,?,?,?,NOW(),NOW())",
-			gThreadID, "mailer-daemon@"+b.OriginDomain, "Mailer Daemon", body)
+			`INSERT INTO "g_message" ("g_thread_id", "sender_email", "sender_name", "body", `+
+				`"created_at", "sent_at") VALUES (?,?,?,?,?,?)`,
+			gThreadID, "mailer-daemon@"+b.OriginDomain, "Mailer Daemon", body, now, now)
 		if err != nil {
 			return fmt.Errorf("create bounce message: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			"INSERT IGNORE INTO `g_subscription` (`g_thread_id`, `email`) VALUES (?,?)",
-			gThreadID, b.SenderEmail); err != nil {
+			`INSERT INTO "g_subscription" ("g_thread_id", "email") VALUES (?,?) ON CONFLICT DO NOTHING`,
+			gThreadID, senderEmail); err != nil {
 			return fmt.Errorf("subscribe bounce recipient: %w", err)
 		}
 		threadID, err := store.Insert(ctx, tx,
-			"INSERT INTO `thread` (`customer_id`, `folder_id`, `g_thread_id`) VALUES (?,?,?)",
+			`INSERT INTO "thread" ("customer_id", "folder_id", "g_thread_id") VALUES (?,?,?)`,
 			customerID, folderID, gThreadID)
 		if err != nil {
 			return fmt.Errorf("create bounce thread projection: %w", err)
 		}
 		if _, err := store.Insert(ctx, tx,
-			"INSERT INTO `message` (`customer_id`, `thread_id`, `g_message_id`) VALUES (?,?,?)",
+			`INSERT INTO "message" ("customer_id", "thread_id", "g_message_id") VALUES (?,?,?)`,
 			customerID, threadID, gMessageID); err != nil {
 			return fmt.Errorf("create bounce message projection: %w", err)
 		}
@@ -359,9 +350,13 @@ func (s *Service) Bounce(ctx context.Context, b federation.BounceNotice) error {
 	})
 }
 
+// truncate shortens v to at most n characters. It counts runes, not bytes,
+// both because varchar(n) does and because cutting inside a UTF-8 sequence
+// leaves text PostgreSQL refuses to store.
 func truncate(v string, n int) string {
-	if len(v) <= n {
+	r := []rune(v)
+	if len(r) <= n {
 		return v
 	}
-	return v[:n]
+	return string(r[:n])
 }

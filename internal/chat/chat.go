@@ -146,33 +146,26 @@ func rfc3339Ptr(t sql.NullTime) *string {
 
 // ListChats returns the chats visible in a mailbox.
 func (s *Service) ListChats(ctx context.Context, customerID, mailboxID int64, search string) ([]Chat, error) {
-	var rows *sql.Rows
-	var err error
+	// A chat with no messages sorts after every chat with some, as it did on
+	// MySQL, where NULL sorts lowest; PostgreSQL needs NULLS LAST to agree. The
+	// id breaks ties so both engines return one order.
+	match, args := "TRUE", []any{customerID, mailboxID}
 	if search != "" {
-		rows, err = s.db.QueryContext(ctx,
-			"SELECT `chat`.`id`, `chat`.`g_chat_id`, `chat`.`muted`, `chat`.`notification_preference`, "+
-				"`g_chat`.`type`, `g_chat`.`name`, `g_chat`.`created_at`, "+
-				"MAX(`g_chat_message`.`created_at`) FROM `chat` "+
-				"LEFT JOIN `g_chat` ON `chat`.`g_chat_id` = `g_chat`.`id` "+
-				"LEFT JOIN `g_chat_message` ON `g_chat`.`id` = `g_chat_message`.`g_chat_id` "+
-				"WHERE `chat`.`customer_id` = ? AND `chat`.`mailbox_id` = ? AND `chat`.`deleted_at` IS NULL AND "+
-				"(MATCH(`g_chat_message`.`body`) AGAINST (? IN BOOLEAN MODE) "+
-				"OR MATCH(`g_chat_message`.`sender_name`) AGAINST (? IN BOOLEAN MODE)) "+
-				"GROUP BY `g_chat`.`id` ORDER BY MAX(`g_chat_message`.`created_at`) DESC, "+
-				"`g_chat`.`created_at` DESC",
-			customerID, mailboxID, search, search)
-	} else {
-		rows, err = s.db.QueryContext(ctx,
-			"SELECT `chat`.`id`, `chat`.`g_chat_id`, `chat`.`muted`, `chat`.`notification_preference`, "+
-				"`g_chat`.`type`, `g_chat`.`name`, `g_chat`.`created_at`, "+
-				"MAX(`g_chat_message`.`created_at`) FROM `chat` "+
-				"LEFT JOIN `g_chat` ON `chat`.`g_chat_id` = `g_chat`.`id` "+
-				"LEFT JOIN `g_chat_message` ON `g_chat`.`id` = `g_chat_message`.`g_chat_id` "+
-				"WHERE `chat`.`customer_id` = ? AND `chat`.`mailbox_id` = ? AND `chat`.`deleted_at` IS NULL "+
-				"GROUP BY `g_chat`.`id` ORDER BY MAX(`g_chat_message`.`created_at`) DESC, "+
-				"`g_chat`.`created_at` DESC",
-			customerID, mailboxID)
+		var matchArgs []any
+		match, matchArgs = s.db.Match("g_chat_message", store.ParseQuery(search))
+		args = append(args, matchArgs...)
 	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT "chat"."id", "chat"."g_chat_id", "chat"."muted", "chat"."notification_preference", `+
+			`"g_chat"."type", "g_chat"."name", "g_chat"."created_at", `+
+			`MAX("g_chat_message"."created_at") FROM "chat" `+
+			`LEFT JOIN "g_chat" ON "chat"."g_chat_id" = "g_chat"."id" `+
+			`LEFT JOIN "g_chat_message" ON "g_chat"."id" = "g_chat_message"."g_chat_id" `+
+			`WHERE "chat"."customer_id" = ? AND "chat"."mailbox_id" = ? AND "chat"."deleted_at" IS NULL `+
+			`AND `+match+` GROUP BY "chat"."id", "g_chat"."id" `+
+			`ORDER BY MAX("g_chat_message"."created_at") DESC NULLS LAST, "g_chat"."created_at" DESC, `+
+			`"chat"."id" DESC`,
+		args...)
 	if err != nil {
 		return nil, fmt.Errorf("list chats: %w", err)
 	}
@@ -185,7 +178,8 @@ func (s *Service) ListChats(ctx context.Context, customerID, mailboxID int64, se
 		var c Chat
 		var gChatID int64
 		var name sql.NullString
-		var createdAt, lastMessageAt sql.NullTime
+		var createdAt sql.NullTime
+		var lastMessageAt store.NullTime
 		if err := rows.Scan(&c.ChatID, &gChatID, &c.Muted, &c.NotificationPreference,
 			&c.Type, &name, &createdAt, &lastMessageAt); err != nil {
 			return nil, fmt.Errorf("scan chat: %w", err)
@@ -215,10 +209,10 @@ func (s *Service) ListChats(ctx context.Context, customerID, mailboxID int64, se
 
 	inC := store.Placeholders(len(chatIDs))
 	unread, err := store.SelectCounts(ctx, s.db,
-		"SELECT `chat`.`id`, COUNT(`chat_message`.`id`) FROM `chat_message` "+
-			"LEFT JOIN `chat` ON `chat_message`.`chat_id` = `chat`.`id` "+
-			"WHERE `chat`.`customer_id` = ? AND `chat`.`id` IN ("+inC+") AND `chat_message`.`read_at` IS NULL "+
-			"GROUP BY `chat`.`id`",
+		`SELECT "chat"."id", COUNT("chat_message"."id") FROM "chat_message" `+
+			`LEFT JOIN "chat" ON "chat_message"."chat_id" = "chat"."id" `+
+			`WHERE "chat"."customer_id" = ? AND "chat"."id" IN (`+inC+`) AND "chat_message"."read_at" IS NULL `+
+			`GROUP BY "chat"."id"`,
 		append([]any{customerID}, store.Args(chatIDs)...)...)
 	if err != nil {
 		return nil, fmt.Errorf("count unread chat messages: %w", err)
@@ -243,11 +237,11 @@ func (s *Service) participantsByChat(ctx context.Context, customerID int64, gCha
 	}
 	in := store.Placeholders(len(gChatIDs))
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT `g_chat_participant`.`g_chat_id`, `g_chat_participant`.`email`, "+
-			"`g_chat_participant`.`role`, `contact`.`name` FROM `g_chat_participant` "+
-			"LEFT JOIN `contact` ON `g_chat_participant`.`email` = `contact`.`email` "+
-			"AND `contact`.`customer_id` = ? "+
-			"WHERE `g_chat_participant`.`g_chat_id` IN ("+in+") AND `g_chat_participant`.`left_at` IS NULL",
+		`SELECT "g_chat_participant"."g_chat_id", "g_chat_participant"."email", `+
+			`"g_chat_participant"."role", "contact"."name" FROM "g_chat_participant" `+
+			`LEFT JOIN "contact" ON "g_chat_participant"."email" = "contact"."email" `+
+			`AND "contact"."customer_id" = ? `+
+			`WHERE "g_chat_participant"."g_chat_id" IN (`+in+`) AND "g_chat_participant"."left_at" IS NULL`,
 		append([]any{customerID}, store.Args(gChatIDs)...)...)
 	if err != nil {
 		return nil, fmt.Errorf("list chat participants: %w", err)
@@ -272,9 +266,14 @@ func (s *Service) participantsByChat(ctx context.Context, customerID int64, gCha
 func (s *Service) AddChat(ctx context.Context, customerID, mailboxID int64,
 	chatType string, name *string, participants []string) (int64, error) {
 	var chatID int64
+	addresses := make([]string, len(participants))
+	for i, email := range participants {
+		addresses[i] = store.Address(email)
+	}
+	participants = addresses
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		creator, err := store.SelectString(ctx, tx,
-			"SELECT `email` FROM `alias` WHERE `customer_id` = ? AND `mailbox_id` = ? LIMIT 1",
+			`SELECT "email" FROM "alias" WHERE "customer_id" = ? AND "mailbox_id" = ? LIMIT 1`,
 			customerID, mailboxID)
 		if err != nil {
 			return fmt.Errorf("look up creator alias: %w", err)
@@ -283,18 +282,18 @@ func (s *Service) AddChat(ctx context.Context, customerID, mailboxID int64,
 			return nil
 		}
 		gChatID, err := store.Insert(ctx, tx,
-			"INSERT INTO `g_chat` (`type`, `name`, `created_by_email`) VALUES (?,?,?)",
+			`INSERT INTO "g_chat" ("type", "name", "created_by_email") VALUES (?,?,?)`,
 			chatType, name, creator)
 		if err != nil {
 			return fmt.Errorf("create chat: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO `g_chat_participant` (`g_chat_id`, `email`, `role`) VALUES (?,?,'creator')",
+			`INSERT INTO "g_chat_participant" ("g_chat_id", "email", "role") VALUES (?,?,'creator')`,
 			gChatID, creator); err != nil {
 			return fmt.Errorf("add creator: %w", err)
 		}
 		chatID, err = store.Insert(ctx, tx,
-			"INSERT INTO `chat` (`customer_id`, `mailbox_id`, `g_chat_id`) VALUES (?,?,?)",
+			`INSERT INTO "chat" ("customer_id", "mailbox_id", "g_chat_id") VALUES (?,?,?)`,
 			customerID, mailboxID, gChatID)
 		if err != nil {
 			return fmt.Errorf("create chat projection: %w", err)
@@ -304,7 +303,7 @@ func (s *Service) AddChat(ctx context.Context, customerID, mailboxID int64,
 				continue
 			}
 			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO `g_chat_participant` (`g_chat_id`, `email`, `role`) VALUES (?,?,'member')",
+				`INSERT INTO "g_chat_participant" ("g_chat_id", "email", "role") VALUES (?,?,'member')`,
 				gChatID, email); err != nil {
 				return fmt.Errorf("add participant %s: %w", email, err)
 			}
@@ -321,9 +320,9 @@ func (s *Service) AddChat(ctx context.Context, customerID, mailboxID int64,
 func projectChat(ctx context.Context, tx *sql.Tx, gChatID int64, email string) error {
 	var participantCustomerID, mailboxID int64
 	err := tx.QueryRowContext(ctx,
-		"SELECT `mailbox`.`customer_id`, `mailbox`.`id` FROM `alias` "+
-			"JOIN `mailbox` ON `mailbox`.`id` = `alias`.`mailbox_id` "+
-			"WHERE `alias`.`email` = ? LIMIT 1", email).Scan(&participantCustomerID, &mailboxID)
+		`SELECT "mailbox"."customer_id", "mailbox"."id" FROM "alias" `+
+			`JOIN "mailbox" ON "mailbox"."id" = "alias"."mailbox_id" `+
+			`WHERE "alias"."email" = ? LIMIT 1`, email).Scan(&participantCustomerID, &mailboxID)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -331,7 +330,7 @@ func projectChat(ctx context.Context, tx *sql.Tx, gChatID int64, email string) e
 		return fmt.Errorf("look up participant mailbox: %w", err)
 	}
 	existing, err := store.SelectInt(ctx, tx,
-		"SELECT `id` FROM `chat` WHERE `customer_id` = ? AND `g_chat_id` = ? LIMIT 1",
+		`SELECT "id" FROM "chat" WHERE "customer_id" = ? AND "g_chat_id" = ? LIMIT 1`,
 		participantCustomerID, gChatID)
 	if err != nil {
 		return fmt.Errorf("look up chat projection: %w", err)
@@ -340,7 +339,7 @@ func projectChat(ctx context.Context, tx *sql.Tx, gChatID int64, email string) e
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx,
-		"INSERT INTO `chat` (`customer_id`, `mailbox_id`, `g_chat_id`) VALUES (?,?,?)",
+		`INSERT INTO "chat" ("customer_id", "mailbox_id", "g_chat_id") VALUES (?,?,?)`,
 		participantCustomerID, mailboxID, gChatID); err != nil {
 		return fmt.Errorf("create chat projection: %w", err)
 	}
@@ -353,7 +352,7 @@ func (s *Service) EditChat(ctx context.Context, customerID, chatID int64,
 	return true, s.db.Tx(ctx, func(tx *sql.Tx) error {
 		if name != nil {
 			gChatID, err := store.SelectInt(ctx, tx,
-				"SELECT `g_chat_id` FROM `chat` WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
+				`SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
 				customerID, chatID)
 			if err != nil {
 				return fmt.Errorf("look up chat: %w", err)
@@ -362,20 +361,20 @@ func (s *Service) EditChat(ctx context.Context, customerID, chatID int64,
 				return nil
 			}
 			if _, err := tx.ExecContext(ctx,
-				"UPDATE `g_chat` SET `name` = ? WHERE `id` = ?", *name, gChatID); err != nil {
+				`UPDATE "g_chat" SET "name" = ? WHERE "id" = ?`, *name, gChatID); err != nil {
 				return fmt.Errorf("rename chat: %w", err)
 			}
 		}
 		if muted != nil {
 			if _, err := tx.ExecContext(ctx,
-				"UPDATE `chat` SET `muted` = ? WHERE `customer_id` = ? AND `id` = ?",
+				`UPDATE "chat" SET "muted" = ? WHERE "customer_id" = ? AND "id" = ?`,
 				*muted, customerID, chatID); err != nil {
 				return fmt.Errorf("mute chat: %w", err)
 			}
 		}
 		if preference != nil {
 			if _, err := tx.ExecContext(ctx,
-				"UPDATE `chat` SET `notification_preference` = ? WHERE `customer_id` = ? AND `id` = ?",
+				`UPDATE "chat" SET "notification_preference" = ? WHERE "customer_id" = ? AND "id" = ?`,
 				*preference, customerID, chatID); err != nil {
 				return fmt.Errorf("set notification preference: %w", err)
 			}
@@ -387,8 +386,8 @@ func (s *Service) EditChat(ctx context.Context, customerID, chatID int64,
 // DeleteChat hides a chat from the caller. Other participants keep theirs.
 func (s *Service) DeleteChat(ctx context.Context, customerID, chatID int64) (bool, error) {
 	n, err := store.Affected(ctx, s.db,
-		"UPDATE `chat` SET `deleted_at` = NOW() WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
-		customerID, chatID)
+		`UPDATE "chat" SET "deleted_at" = ? WHERE "customer_id" = ? AND "id" = ?`,
+		s.db.Now(), customerID, chatID)
 	if err != nil {
 		return false, fmt.Errorf("delete chat: %w", err)
 	}
@@ -398,7 +397,7 @@ func (s *Service) DeleteChat(ctx context.Context, customerID, chatID int64) (boo
 // ListParticipants returns the active members of a chat with their presence.
 func (s *Service) ListParticipants(ctx context.Context, customerID, chatID int64) ([]Participant, error) {
 	gChatID, err := store.SelectInt(ctx, s.db,
-		"SELECT `g_chat_id` FROM `chat` WHERE `customer_id` = ? AND `id` = ? LIMIT 1", customerID, chatID)
+		`SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`, customerID, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("look up chat: %w", err)
 	}
@@ -406,15 +405,15 @@ func (s *Service) ListParticipants(ctx context.Context, customerID, chatID int64
 		return []Participant{}, nil
 	}
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT `g_chat_participant`.`id`, `g_chat_participant`.`email`, `g_chat_participant`.`role`, "+
-			"`g_chat_participant`.`joined_at`, `g_chat_participant`.`left_at`, `contact`.`name`, "+
-			"`presence_status`.`status` FROM `g_chat_participant` "+
-			"LEFT JOIN `contact` ON `g_chat_participant`.`email` = `contact`.`email` "+
-			"AND `contact`.`customer_id` = ? "+
-			"LEFT JOIN `user` ON `user`.`username` = `g_chat_participant`.`email` "+
-			"LEFT JOIN `presence_status` ON `presence_status`.`user_id` = `user`.`id` "+
-			"WHERE `g_chat_participant`.`g_chat_id` = ? AND `g_chat_participant`.`left_at` IS NULL "+
-			"ORDER BY `g_chat_participant`.`id`",
+		`SELECT "g_chat_participant"."id", "g_chat_participant"."email", "g_chat_participant"."role", `+
+			`"g_chat_participant"."joined_at", "g_chat_participant"."left_at", "contact"."name", `+
+			`"presence_status"."status" FROM "g_chat_participant" `+
+			`LEFT JOIN "contact" ON "g_chat_participant"."email" = "contact"."email" `+
+			`AND "contact"."customer_id" = ? `+
+			`LEFT JOIN "user" ON "user"."username" = "g_chat_participant"."email" `+
+			`LEFT JOIN "presence_status" ON "presence_status"."user_id" = "user"."id" `+
+			`WHERE "g_chat_participant"."g_chat_id" = ? AND "g_chat_participant"."left_at" IS NULL `+
+			`ORDER BY "g_chat_participant"."id"`,
 		customerID, gChatID)
 	if err != nil {
 		return nil, fmt.Errorf("list participants: %w", err)
@@ -446,10 +445,11 @@ func (s *Service) ListParticipants(ctx context.Context, customerID, chatID int64
 
 // AddParticipant adds an address to a chat.
 func (s *Service) AddParticipant(ctx context.Context, customerID, chatID int64, email, role string) (int64, error) {
+	email = store.Address(email)
 	var participantID int64
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		gChatID, err := store.SelectInt(ctx, tx,
-			"SELECT `g_chat_id` FROM `chat` WHERE `customer_id` = ? AND `id` = ? LIMIT 1", customerID, chatID)
+			`SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`, customerID, chatID)
 		if err != nil {
 			return fmt.Errorf("look up chat: %w", err)
 		}
@@ -457,7 +457,7 @@ func (s *Service) AddParticipant(ctx context.Context, customerID, chatID int64, 
 			return nil
 		}
 		participantID, err = store.Insert(ctx, tx,
-			"INSERT INTO `g_chat_participant` (`g_chat_id`, `email`, `role`) VALUES (?,?,?)",
+			`INSERT INTO "g_chat_participant" ("g_chat_id", "email", "role") VALUES (?,?,?)`,
 			gChatID, email, role)
 		if err != nil {
 			return fmt.Errorf("add participant: %w", err)
@@ -471,9 +471,9 @@ func (s *Service) AddParticipant(ctx context.Context, customerID, chatID int64, 
 func (s *Service) RemoveParticipant(ctx context.Context, customerID, participantID int64) (bool, error) {
 	// The participant must be in a chat the caller can see.
 	n, err := store.Affected(ctx, s.db,
-		"UPDATE `g_chat_participant` SET `left_at` = NOW() WHERE `id` = ? AND `left_at` IS NULL "+
-			"AND `g_chat_id` IN (SELECT `g_chat_id` FROM `chat` WHERE `customer_id` = ?)",
-		participantID, customerID)
+		`UPDATE "g_chat_participant" SET "left_at" = ? WHERE "id" = ? AND "left_at" IS NULL `+
+			`AND "g_chat_id" IN (SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ?)`,
+		s.db.Now(), participantID, customerID)
 	if err != nil {
 		return false, fmt.Errorf("remove participant: %w", err)
 	}
@@ -482,32 +482,21 @@ func (s *Service) RemoveParticipant(ctx context.Context, customerID, participant
 
 // ListMessages returns a chat's messages, newest first.
 func (s *Service) ListMessages(ctx context.Context, customerID, chatID int64, search string) ([]Message, error) {
-	var rows *sql.Rows
-	var err error
+	match, args := "TRUE", []any{customerID, chatID}
 	if search != "" {
-		rows, err = s.db.QueryContext(ctx,
-			"SELECT `chat_message`.`id`, `chat_message`.`delivered_at`, `chat_message`.`read_at`, "+
-				"`g_chat_message`.`id`, `g_chat_message`.`sender_email`, `g_chat_message`.`sender_name`, "+
-				"`g_chat_message`.`body`, `g_chat_message`.`body_html`, `g_chat_message`.`created_at`, "+
-				"`g_chat_message`.`edited_at`, `g_chat_message`.`deleted_at` FROM `chat_message` "+
-				"LEFT JOIN `g_chat_message` ON `chat_message`.`g_chat_message_id` = `g_chat_message`.`id` "+
-				"WHERE `chat_message`.`customer_id` = ? AND `chat_message`.`chat_id` = ? "+
-				"AND `g_chat_message`.`deleted_at` IS NULL AND "+
-				"(MATCH(`g_chat_message`.`body`) AGAINST (? IN BOOLEAN MODE) "+
-				"OR MATCH(`g_chat_message`.`sender_name`) AGAINST (? IN BOOLEAN MODE)) "+
-				"ORDER BY `chat_message`.`id` DESC",
-			customerID, chatID, search, search)
-	} else {
-		rows, err = s.db.QueryContext(ctx,
-			"SELECT `chat_message`.`id`, `chat_message`.`delivered_at`, `chat_message`.`read_at`, "+
-				"`g_chat_message`.`id`, `g_chat_message`.`sender_email`, `g_chat_message`.`sender_name`, "+
-				"`g_chat_message`.`body`, `g_chat_message`.`body_html`, `g_chat_message`.`created_at`, "+
-				"`g_chat_message`.`edited_at`, `g_chat_message`.`deleted_at` FROM `chat_message` "+
-				"LEFT JOIN `g_chat_message` ON `chat_message`.`g_chat_message_id` = `g_chat_message`.`id` "+
-				"WHERE `chat_message`.`customer_id` = ? AND `chat_message`.`chat_id` = ? "+
-				"AND `g_chat_message`.`deleted_at` IS NULL ORDER BY `chat_message`.`id` DESC",
-			customerID, chatID)
+		var matchArgs []any
+		match, matchArgs = s.db.Match("g_chat_message", store.ParseQuery(search))
+		args = append(args, matchArgs...)
 	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT "chat_message"."id", "chat_message"."delivered_at", "chat_message"."read_at", `+
+			`"g_chat_message"."id", "g_chat_message"."sender_email", "g_chat_message"."sender_name", `+
+			`"g_chat_message"."body", "g_chat_message"."body_html", "g_chat_message"."created_at", `+
+			`"g_chat_message"."edited_at", "g_chat_message"."deleted_at" FROM "chat_message" `+
+			`LEFT JOIN "g_chat_message" ON "chat_message"."g_chat_message_id" = "g_chat_message"."id" `+
+			`WHERE "chat_message"."customer_id" = ? AND "chat_message"."chat_id" = ? `+
+			`AND "g_chat_message"."deleted_at" IS NULL AND `+match+` ORDER BY "chat_message"."id" DESC`,
+		args...)
 	if err != nil {
 		return nil, fmt.Errorf("list chat messages: %w", err)
 	}
@@ -547,14 +536,14 @@ func (s *Service) ListMessages(ctx context.Context, customerID, chatID int64, se
 	}
 
 	gChatID, err := store.SelectInt(ctx, s.db,
-		"SELECT `g_chat_id` FROM `chat` WHERE `customer_id` = ? AND `id` = ? LIMIT 1", customerID, chatID)
+		`SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`, customerID, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("look up chat: %w", err)
 	}
 	names, err := store.SelectPairs(ctx, s.db,
-		"SELECT `g_chat_message`.`sender_email`, `contact`.`name` FROM `g_chat_message` "+
-			"LEFT JOIN `contact` ON `g_chat_message`.`sender_email` = `contact`.`email` "+
-			"AND `contact`.`customer_id` = ? WHERE `g_chat_message`.`g_chat_id` = ?",
+		`SELECT "g_chat_message"."sender_email", "contact"."name" FROM "g_chat_message" `+
+			`LEFT JOIN "contact" ON "g_chat_message"."sender_email" = "contact"."email" `+
+			`AND "contact"."customer_id" = ? WHERE "g_chat_message"."g_chat_id" = ?`,
 		customerID, gChatID)
 	if err != nil {
 		return nil, fmt.Errorf("list sender names: %w", err)
@@ -588,8 +577,8 @@ func (s *Service) ListMessages(ctx context.Context, customerID, chatID int64, se
 func (s *Service) attachmentsByMessage(ctx context.Context, gMessageIDs []int64) (map[int64][]AttachmentRef, error) {
 	in := store.Placeholders(len(gMessageIDs))
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT `g_chat_message_id`, `id`, `file_name`, `mime_type`, `file_size` "+
-			"FROM `g_chat_attachment` WHERE `g_chat_message_id` IN ("+in+") ORDER BY `id`",
+		`SELECT "g_chat_message_id", "id", "file_name", "mime_type", "file_size" `+
+			`FROM "g_chat_attachment" WHERE "g_chat_message_id" IN (`+in+`) ORDER BY "id"`,
 		store.Args(gMessageIDs)...)
 	if err != nil {
 		return nil, fmt.Errorf("list chat attachments: %w", err)
@@ -613,10 +602,10 @@ func (s *Service) attachmentsByMessage(ctx context.Context, gMessageIDs []int64)
 func (s *Service) deliveryStatuses(ctx context.Context, gMessageIDs []int64) (map[int64]DeliveryStatus, error) {
 	in := store.Placeholders(len(gMessageIDs))
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT `g_chat_message_id`, COUNT(*), "+
-			"COUNT(CASE WHEN `delivered_at` IS NOT NULL THEN 1 END), "+
-			"COUNT(CASE WHEN `read_at` IS NOT NULL THEN 1 END) "+
-			"FROM `chat_message` WHERE `g_chat_message_id` IN ("+in+") GROUP BY `g_chat_message_id`",
+		`SELECT "g_chat_message_id", COUNT(*), `+
+			`COUNT(CASE WHEN "delivered_at" IS NOT NULL THEN 1 END), `+
+			`COUNT(CASE WHEN "read_at" IS NOT NULL THEN 1 END) `+
+			`FROM "chat_message" WHERE "g_chat_message_id" IN (`+in+`) GROUP BY "g_chat_message_id"`,
 		store.Args(gMessageIDs)...)
 	if err != nil {
 		return nil, fmt.Errorf("count delivery status: %w", err)
@@ -642,7 +631,7 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		var gChatID, mailboxID int64
 		err := tx.QueryRowContext(ctx,
-			"SELECT `g_chat_id`, `mailbox_id` FROM `chat` WHERE `customer_id` = ? AND `id` = ? LIMIT 1",
+			`SELECT "g_chat_id", "mailbox_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
 			customerID, chatID).Scan(&gChatID, &mailboxID)
 		if err == sql.ErrNoRows {
 			return nil
@@ -652,7 +641,7 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 		}
 		var senderEmail, senderName string
 		err = tx.QueryRowContext(ctx,
-			"SELECT `email`, `name` FROM `alias` WHERE `customer_id` = ? AND `mailbox_id` = ? LIMIT 1",
+			`SELECT "email", "name" FROM "alias" WHERE "customer_id" = ? AND "mailbox_id" = ? LIMIT 1`,
 			customerID, mailboxID).Scan(&senderEmail, &senderName)
 		if err == sql.ErrNoRows {
 			return nil
@@ -662,7 +651,7 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 		}
 
 		participants, err := store.SelectStrings(ctx, tx,
-			"SELECT `email` FROM `g_chat_participant` WHERE `g_chat_id` = ? AND `left_at` IS NULL", gChatID)
+			`SELECT "email" FROM "g_chat_participant" WHERE "g_chat_id" = ? AND "left_at" IS NULL`, gChatID)
 		if err != nil {
 			return fmt.Errorf("list participants: %w", err)
 		}
@@ -670,10 +659,11 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 			return nil
 		}
 
+		now := s.db.Now()
 		gMessageID, err := store.Insert(ctx, tx,
-			"INSERT INTO `g_chat_message` (`g_chat_id`, `sender_email`, `sender_name`, `body`, `body_html`) "+
-				"VALUES (?,?,?,?,?)",
-			gChatID, senderEmail, senderName, body, nullable(bodyHTML))
+			`INSERT INTO "g_chat_message" ("g_chat_id", "sender_email", "sender_name", "body", "body_html", `+
+				`"created_at") VALUES (?,?,?,?,?,?)`,
+			gChatID, senderEmail, senderName, body, nullable(bodyHTML), now)
 		if err != nil {
 			return fmt.Errorf("create chat message: %w", err)
 		}
@@ -683,8 +673,8 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 				return err
 			}
 			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO `g_chat_attachment` (`g_chat_message_id`, `file_name`, `mime_type`, "+
-					"`file_size`, `hash_md5`) VALUES (?,?,?,?,?)",
+				`INSERT INTO "g_chat_attachment" ("g_chat_message_id", "file_name", "mime_type", `+
+					`"file_size", "hash_md5") VALUES (?,?,?,?,?)`,
 				gMessageID, a.FileName, a.MimeType, len(a.FileData), hash); err != nil {
 				return fmt.Errorf("create chat attachment: %w", err)
 			}
@@ -693,7 +683,7 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 		for _, email := range participants {
 			var participantCustomerID int64
 			err := tx.QueryRowContext(ctx,
-				"SELECT `customer_id` FROM `alias` WHERE `email` = ? LIMIT 1", email).Scan(&participantCustomerID)
+				`SELECT "customer_id" FROM "alias" WHERE "email" = ? LIMIT 1`, email).Scan(&participantCustomerID)
 			if err == sql.ErrNoRows {
 				continue
 			}
@@ -701,7 +691,7 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 				return fmt.Errorf("look up participant customer: %w", err)
 			}
 			participantChatID, err := store.SelectInt(ctx, tx,
-				"SELECT `id` FROM `chat` WHERE `customer_id` = ? AND `g_chat_id` = ? LIMIT 1",
+				`SELECT "id" FROM "chat" WHERE "customer_id" = ? AND "g_chat_id" = ? LIMIT 1`,
 				participantCustomerID, gChatID)
 			if err != nil {
 				return fmt.Errorf("look up participant chat: %w", err)
@@ -710,9 +700,9 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 				continue
 			}
 			projectionID, err := store.Insert(ctx, tx,
-				"INSERT INTO `chat_message` (`customer_id`, `chat_id`, `g_chat_message_id`, `delivered_at`) "+
-					"VALUES (?,?,?,NOW())",
-				participantCustomerID, participantChatID, gMessageID)
+				`INSERT INTO "chat_message" ("customer_id", "chat_id", "g_chat_message_id", "delivered_at") `+
+					"VALUES (?,?,?,?)",
+				participantCustomerID, participantChatID, gMessageID, now)
 			if err != nil {
 				return fmt.Errorf("create chat message projection: %w", err)
 			}
@@ -720,19 +710,19 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 			if email == senderEmail {
 				status = "read"
 				if _, err := tx.ExecContext(ctx,
-					"UPDATE `chat_message` SET `read_at` = NOW() WHERE `id` = ?", projectionID); err != nil {
+					`UPDATE "chat_message" SET "read_at" = ? WHERE "id" = ?`, now, projectionID); err != nil {
 					return fmt.Errorf("mark own message read: %w", err)
 				}
 				if _, err := tx.ExecContext(ctx,
-					"UPDATE `chat` SET `last_read_message_id` = ? WHERE `id` = ?",
+					`UPDATE "chat" SET "last_read_message_id" = ? WHERE "id" = ?`,
 					gMessageID, participantChatID); err != nil {
 					return fmt.Errorf("advance read marker: %w", err)
 				}
 				messageID = projectionID
 			}
 			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO `message_status` (`g_chat_message_id`, `recipient_email`, `status`, `timestamp`) "+
-					"VALUES (?,?,?,NOW())", gMessageID, email, status); err != nil {
+				`INSERT INTO "message_status" ("g_chat_message_id", "recipient_email", "status", "timestamp") `+
+					"VALUES (?,?,?,?)", gMessageID, email, status, now); err != nil {
 				return fmt.Errorf("record message status: %w", err)
 			}
 		}
@@ -755,8 +745,8 @@ func (s *Service) EditMessage(ctx context.Context, customerID, messageID int64, 
 		return false, err
 	}
 	n, err := store.Affected(ctx, s.db,
-		"UPDATE `g_chat_message` SET `body` = ?, `body_html` = ?, `edited_at` = NOW() WHERE `id` = ?",
-		body, nullable(bodyHTML), gMessageID)
+		`UPDATE "g_chat_message" SET "body" = ?, "body_html" = ?, "edited_at" = ? WHERE "id" = ?`,
+		body, nullable(bodyHTML), s.db.Now(), gMessageID)
 	if err != nil {
 		return false, fmt.Errorf("edit chat message: %w", err)
 	}
@@ -771,7 +761,7 @@ func (s *Service) DeleteMessage(ctx context.Context, customerID, messageID int64
 		return false, err
 	}
 	n, err := store.Affected(ctx, s.db,
-		"UPDATE `g_chat_message` SET `deleted_at` = NOW() WHERE `id` = ?", gMessageID)
+		`UPDATE "g_chat_message" SET "deleted_at" = ? WHERE "id" = ?`, s.db.Now(), gMessageID)
 	if err != nil {
 		return false, fmt.Errorf("delete chat message: %w", err)
 	}
@@ -785,10 +775,10 @@ func (s *Service) editableMessage(ctx context.Context, customerID, messageID int
 	var senderEmail string
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `g_chat_message`.`id`, `g_chat_message`.`sender_email`, `g_chat_message`.`created_at` "+
-			"FROM `chat_message` "+
-			"JOIN `g_chat_message` ON `chat_message`.`g_chat_message_id` = `g_chat_message`.`id` "+
-			"WHERE `chat_message`.`customer_id` = ? AND `chat_message`.`id` = ? LIMIT 1",
+		`SELECT "g_chat_message"."id", "g_chat_message"."sender_email", "g_chat_message"."created_at" `+
+			`FROM "chat_message" `+
+			`JOIN "g_chat_message" ON "chat_message"."g_chat_message_id" = "g_chat_message"."id" `+
+			`WHERE "chat_message"."customer_id" = ? AND "chat_message"."id" = ? LIMIT 1`,
 		customerID, messageID).Scan(&gMessageID, &senderEmail, &createdAt)
 	if err == sql.ErrNoRows {
 		return 0, nil
@@ -796,12 +786,12 @@ func (s *Service) editableMessage(ctx context.Context, customerID, messageID int
 	if err != nil {
 		return 0, fmt.Errorf("look up chat message: %w", err)
 	}
-	if time.Since(createdAt.UTC()) > EditWindow {
+	if s.db.Now().Sub(createdAt) > EditWindow {
 		return 0, nil
 	}
 	// Only the author may edit, which the PHP does not check.
 	owns, err := store.SelectInt(ctx, s.db,
-		"SELECT `id` FROM `alias` WHERE `customer_id` = ? AND `email` = ? LIMIT 1", customerID, senderEmail)
+		`SELECT "id" FROM "alias" WHERE "customer_id" = ? AND "email" = ? LIMIT 1`, customerID, senderEmail)
 	if err != nil {
 		return 0, fmt.Errorf("verify message author: %w", err)
 	}
@@ -816,10 +806,10 @@ func (s *Service) GetAttachment(ctx context.Context, customerID, attachmentID in
 	var a AttachmentData
 	var hash string
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `g_chat_attachment`.`file_name`, `g_chat_attachment`.`mime_type`, "+
-			"`g_chat_attachment`.`file_size`, `g_chat_attachment`.`hash_md5` FROM `g_chat_attachment` "+
-			"JOIN `chat_message` ON `chat_message`.`g_chat_message_id` = `g_chat_attachment`.`g_chat_message_id` "+
-			"WHERE `g_chat_attachment`.`id` = ? AND `chat_message`.`customer_id` = ? LIMIT 1",
+		`SELECT "g_chat_attachment"."file_name", "g_chat_attachment"."mime_type", `+
+			`"g_chat_attachment"."file_size", "g_chat_attachment"."hash_md5" FROM "g_chat_attachment" `+
+			`JOIN "chat_message" ON "chat_message"."g_chat_message_id" = "g_chat_attachment"."g_chat_message_id" `+
+			`WHERE "g_chat_attachment"."id" = ? AND "chat_message"."customer_id" = ? LIMIT 1`,
 		attachmentID, customerID).Scan(&a.FileName, &a.MimeType, &a.FileSize, &hash)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -842,8 +832,8 @@ func (s *Service) GetPresence(ctx context.Context, customerID int64, userIDs []i
 	}
 	in := store.Placeholders(len(userIDs))
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT `user_id`, `status`, `last_activity_at` FROM `presence_status` "+
-			"WHERE `customer_id` = ? AND `user_id` IN ("+in+")",
+		`SELECT "user_id", "status", "last_activity_at" FROM "presence_status" `+
+			`WHERE "customer_id" = ? AND "user_id" IN (`+in+")",
 		append([]any{customerID}, store.Args(userIDs)...)...)
 	if err != nil {
 		return nil, fmt.Errorf("get presence: %w", err)
@@ -861,7 +851,7 @@ func (s *Service) GetPresence(ctx context.Context, customerID int64, userIDs []i
 			p.LastActivityAt = rfc3339(lastActivity.Time)
 			// A user who stopped reporting is stale, so derive the current
 			// status rather than trusting a value nobody refreshed.
-			p.Status = derive(p.Status, lastActivity.Time)
+			p.Status = derive(p.Status, s.db.Now().Sub(lastActivity.Time))
 		}
 		known[p.UserID] = p
 	}
@@ -880,12 +870,12 @@ func (s *Service) GetPresence(ctx context.Context, customerID int64, userIDs []i
 	return out, nil
 }
 
-// derive ages a stored status: away after 10 idle minutes, offline after 15.
-func derive(status string, lastActivity time.Time) string {
+// derive ages a stored status by how long the user has been idle: away after
+// 10 minutes, offline after 15.
+func derive(status string, idle time.Duration) string {
 	if status == "offline" {
 		return status
 	}
-	idle := time.Since(lastActivity.UTC())
 	switch {
 	case idle > 15*time.Minute:
 		return "offline"
@@ -903,10 +893,11 @@ func (s *Service) SetPresence(ctx context.Context, customerID, userID int64, sta
 		return false, nil
 	}
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO `presence_status` (`customer_id`, `user_id`, `status`, `last_activity_at`) "+
-			"VALUES (?,?,?,NOW()) ON DUPLICATE KEY UPDATE "+
-			"`status` = VALUES(`status`), `last_activity_at` = VALUES(`last_activity_at`)",
-		customerID, userID, status)
+		`INSERT INTO "presence_status" ("customer_id", "user_id", "status", "last_activity_at") `+
+			`VALUES (?,?,?,?) ON CONFLICT ("user_id") DO UPDATE SET `+
+			`"status" = "excluded"."status", "last_activity_at" = "excluded"."last_activity_at", `+
+			`"updated_at" = "excluded"."last_activity_at"`,
+		customerID, userID, status, s.db.Now())
 	if err != nil {
 		return false, fmt.Errorf("set presence: %w", err)
 	}
@@ -917,7 +908,7 @@ func (s *Service) SetPresence(ctx context.Context, customerID, userID int64, sta
 // caller's own.
 func (s *Service) GetTyping(ctx context.Context, customerID, userID, chatID int64) ([]TypingIndicator, error) {
 	gChatID, err := store.SelectInt(ctx, s.db,
-		"SELECT `g_chat_id` FROM `chat` WHERE `customer_id` = ? AND `id` = ? LIMIT 1", customerID, chatID)
+		`SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`, customerID, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("look up chat: %w", err)
 	}
@@ -926,17 +917,18 @@ func (s *Service) GetTyping(ctx context.Context, customerID, userID, chatID int6
 	}
 	// Expired rows are removed on read, which keeps the table from growing
 	// without a separate sweeper.
+	now := s.db.Now()
 	if _, err := s.db.ExecContext(ctx,
-		"DELETE FROM `typing_indicator` WHERE `expires_at` <= NOW()"); err != nil {
+		`DELETE FROM "typing_indicator" WHERE "expires_at" <= ?`, now); err != nil {
 		return nil, fmt.Errorf("expire typing indicators: %w", err)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT `typing_indicator`.`user_id`, `user`.`name`, `typing_indicator`.`started_at`, "+
-			"`typing_indicator`.`expires_at` FROM `typing_indicator` "+
-			"LEFT JOIN `user` ON `user`.`id` = `typing_indicator`.`user_id` "+
-			"WHERE `typing_indicator`.`g_chat_id` = ? AND `typing_indicator`.`user_id` <> ? "+
-			"AND `typing_indicator`.`expires_at` > NOW()",
-		gChatID, userID)
+		`SELECT "typing_indicator"."user_id", "user"."name", "typing_indicator"."started_at", `+
+			`"typing_indicator"."expires_at" FROM "typing_indicator" `+
+			`LEFT JOIN "user" ON "user"."id" = "typing_indicator"."user_id" `+
+			`WHERE "typing_indicator"."g_chat_id" = ? AND "typing_indicator"."user_id" <> ? `+
+			`AND "typing_indicator"."expires_at" > ?`,
+		gChatID, userID, now)
 	if err != nil {
 		return nil, fmt.Errorf("get typing indicators: %w", err)
 	}
@@ -965,18 +957,18 @@ func (s *Service) GetTyping(ctx context.Context, customerID, userID, chatID int6
 // StartTyping starts or extends the caller's typing indicator.
 func (s *Service) StartTyping(ctx context.Context, customerID, userID, chatID int64) (bool, error) {
 	gChatID, err := store.SelectInt(ctx, s.db,
-		"SELECT `g_chat_id` FROM `chat` WHERE `customer_id` = ? AND `id` = ? LIMIT 1", customerID, chatID)
+		`SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`, customerID, chatID)
 	if err != nil {
 		return false, fmt.Errorf("look up chat: %w", err)
 	}
 	if gChatID == 0 {
 		return false, nil
 	}
-	seconds := int(TypingTTL / time.Second)
+	now := s.db.Now()
 	n, err := store.Affected(ctx, s.db,
-		"UPDATE `typing_indicator` SET `expires_at` = DATE_ADD(NOW(), INTERVAL ? SECOND) "+
-			"WHERE `customer_id` = ? AND `g_chat_id` = ? AND `user_id` = ?",
-		seconds, customerID, gChatID, userID)
+		`UPDATE "typing_indicator" SET "expires_at" = ? `+
+			`WHERE "customer_id" = ? AND "g_chat_id" = ? AND "user_id" = ?`,
+		now.Add(TypingTTL), customerID, gChatID, userID)
 	if err != nil {
 		return false, fmt.Errorf("extend typing indicator: %w", err)
 	}
@@ -984,9 +976,9 @@ func (s *Service) StartTyping(ctx context.Context, customerID, userID, chatID in
 		return true, nil
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"INSERT INTO `typing_indicator` (`customer_id`, `g_chat_id`, `user_id`, `expires_at`) "+
-			"VALUES (?,?,?, DATE_ADD(NOW(), INTERVAL ? SECOND))",
-		customerID, gChatID, userID, seconds); err != nil {
+		`INSERT INTO "typing_indicator" ("customer_id", "g_chat_id", "user_id", "started_at", "expires_at") `+
+			"VALUES (?,?,?,?,?)",
+		customerID, gChatID, userID, now, now.Add(TypingTTL)); err != nil {
 		return false, fmt.Errorf("start typing indicator: %w", err)
 	}
 	return true, nil
@@ -995,7 +987,7 @@ func (s *Service) StartTyping(ctx context.Context, customerID, userID, chatID in
 // StopTyping clears the caller's typing indicator.
 func (s *Service) StopTyping(ctx context.Context, customerID, userID, chatID int64) (bool, error) {
 	gChatID, err := store.SelectInt(ctx, s.db,
-		"SELECT `g_chat_id` FROM `chat` WHERE `customer_id` = ? AND `id` = ? LIMIT 1", customerID, chatID)
+		`SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`, customerID, chatID)
 	if err != nil {
 		return false, fmt.Errorf("look up chat: %w", err)
 	}
@@ -1003,7 +995,7 @@ func (s *Service) StopTyping(ctx context.Context, customerID, userID, chatID int
 		return false, nil
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"DELETE FROM `typing_indicator` WHERE `customer_id` = ? AND `g_chat_id` = ? AND `user_id` = ?",
+		`DELETE FROM "typing_indicator" WHERE "customer_id" = ? AND "g_chat_id" = ? AND "user_id" = ?`,
 		customerID, gChatID, userID); err != nil {
 		return false, fmt.Errorf("stop typing indicator: %w", err)
 	}
