@@ -7,7 +7,7 @@
     }
   ],
   "allowedPeers": [],
-  "maxEnvelopeBytes": 10485760,
+  "maxEnvelopeBytes": 37748736,
   "maxAttachmentBytes": 26214400,
   "extraCaFile": "/etc/webmail/certs/webmail-local-ca.crt"
 }

@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-DOMAINS=(103mail.com example.com mail.acme.test acme.test)
+DOMAINS=(103mail.com example.com mail.acme.test acme.test peer.test)
 CERTS=certs
 CA_KEY="$CERTS/webmail-local-ca.key"
 CA_CRT="$CERTS/webmail-local-ca.crt"
@@ -81,7 +81,7 @@ for d in "${DOMAINS[@]}"; do
     }
   ],
   "allowedPeers": [],
-  "maxEnvelopeBytes": 10485760,
+  "maxEnvelopeBytes": 37748736,
   "maxAttachmentBytes": 26214400,
   "extraCaFile": "/etc/webmail/certs/webmail-local-ca.crt"
 }
@@ -162,6 +162,14 @@ if [[ ! -s seed/acme.test.sqlite.sql ]] || $RESEED; then
     echo "writing seed/acme.test.sqlite.sql"
     ./seed.sh acme.test "pete@acme.test" "Pete Smit" "pete@acme.test" \
         > seed/acme.test.sqlite.sql
+fi
+
+# The scripted peer of the end-to-end stories. Nobody signs in to it; the
+# account only makes it a Domain like the others.
+if [[ ! -s seed/peer.test.sqlite.sql ]] || $RESEED; then
+    echo "writing seed/peer.test.sqlite.sql"
+    ./seed.sh peer.test "postmaster@peer.test" "Test Peer" "postmaster@peer.test" \
+        > seed/peer.test.sqlite.sql
 fi
 
 # ── Databases ───────────────────────────────────────────────────────────────

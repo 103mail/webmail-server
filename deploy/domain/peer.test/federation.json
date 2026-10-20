@@ -1,0 +1,13 @@
+{
+  "domains": [
+    {
+      "domain": "peer.test",
+      "customerId": 1,
+      "privateKeyFile": "/etc/webmail/keys/peer.test.ed25519.pem"
+    }
+  ],
+  "allowedPeers": [],
+  "maxEnvelopeBytes": 37748736,
+  "maxAttachmentBytes": 26214400,
+  "extraCaFile": "/etc/webmail/certs/webmail-local-ca.crt"
+}

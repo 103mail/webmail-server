@@ -1,4 +1,4 @@
-# Four independent Domains on one machine, laid out the way the federation
+# Four independent Domains on one machine, and the scripted peer.test, laid out the way the federation
 # design describes: each Domain is its own Server (process + database) and
 # serves its whole webmail surface under the single hostname
 # `webmail.{domain}` (RFC 1.3 "Federation hostname", design 1).
@@ -54,6 +54,9 @@ x-api: &api
     AWS_SECRET_ACCESS_KEY: mailsink
     AWS_EC2_METADATA_DISABLED: "true"
     WEBMAIL_SNS_REGION: eu-west-1
+    # Room for a 25 MiB attachment in base64, the RFC's default cap, with the
+    # nginx client_max_body_size to match.
+    WEBMAIL_MAX_BODY_BYTES: "50331648"
 
 x-web: &web
   build:
@@ -81,7 +84,7 @@ services:
       - "127.0.0.1:8081:8081"
     volumes:
       - ./data/103mail.com:/data
-      - ./domain/103mail.com/federation.json:/etc/webmail/federation.json:ro
+      - ${FEDERATION_CONFIG_103MAIL_COM:-./domain/103mail.com/federation.json}:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
       - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
@@ -128,7 +131,7 @@ services:
       WEBMAIL_WORKER_INTERVAL_SECONDS: "1"
     volumes:
       - ./data/103mail.com:/data
-      - ./domain/103mail.com/federation.json:/etc/webmail/federation.json:ro
+      - ${FEDERATION_CONFIG_103MAIL_COM:-./domain/103mail.com/federation.json}:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
       - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
@@ -181,7 +184,7 @@ services:
       - "127.0.0.2:8081:8081"
     volumes:
       - ./data/example.com:/data
-      - ./domain/example.com/federation.json:/etc/webmail/federation.json:ro
+      - ${FEDERATION_CONFIG_EXAMPLE_COM:-./domain/example.com/federation.json}:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
       - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
@@ -228,7 +231,7 @@ services:
       WEBMAIL_WORKER_INTERVAL_SECONDS: "1"
     volumes:
       - ./data/example.com:/data
-      - ./domain/example.com/federation.json:/etc/webmail/federation.json:ro
+      - ${FEDERATION_CONFIG_EXAMPLE_COM:-./domain/example.com/federation.json}:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
       - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
@@ -282,7 +285,7 @@ services:
       - "127.0.0.3:8081:8081"
     volumes:
       - ./data/mail.acme.test:/data
-      - ./domain/mail.acme.test/federation.json:/etc/webmail/federation.json:ro
+      - ${FEDERATION_CONFIG_MAIL_ACME_TEST:-./domain/mail.acme.test/federation.json}:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
       - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
@@ -326,7 +329,7 @@ services:
       WEBMAIL_WORKER_INTERVAL_SECONDS: "1"
     volumes:
       - ./data/mail.acme.test:/data
-      - ./domain/mail.acme.test/federation.json:/etc/webmail/federation.json:ro
+      - ${FEDERATION_CONFIG_MAIL_ACME_TEST:-./domain/mail.acme.test/federation.json}:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
       - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
@@ -360,7 +363,7 @@ services:
       - "127.0.0.4:8081:8081"
     volumes:
       - ./data/acme.test:/data
-      - ./domain/acme.test/federation.json:/etc/webmail/federation.json:ro
+      - ${FEDERATION_CONFIG_ACME_TEST:-./domain/acme.test/federation.json}:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
       - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
@@ -404,7 +407,7 @@ services:
       WEBMAIL_WORKER_INTERVAL_SECONDS: "1"
     volumes:
       - ./data/acme.test:/data
-      - ./domain/acme.test/federation.json:/etc/webmail/federation.json:ro
+      - ${FEDERATION_CONFIG_ACME_TEST:-./domain/acme.test/federation.json}:/etc/webmail/federation.json:ro
       - ./keys:/etc/webmail/keys:ro
       - ./clock:/etc/webmail/clock:ro
       - ./certs:/etc/webmail/certs:ro
@@ -417,7 +420,72 @@ services:
       dom-parent:
       federation:
 
+  # ── peer.test ──────────────────────────────────────────────────────────────
+  # The scripted peer of the end-to-end stories. It is a Domain like the
+  # others, so it publishes a real descriptor from its own key, but nobody
+  # uses it: the stories sign envelopes with keys/peer.test.ed25519.pem and
+  # send forged, replayed and malformed traffic as it. No worker, because it
+  # never sends anything itself, and no host ports, because only the other
+  # Domains need to reach it.
+  api-peer:
+    labels:
+      webmail.domain: peer.test
+    <<: *api
+    environment:
+      <<: *api-env
+      WEBMAIL_ALLOWED_ORIGINS: https://webmail.peer.test
+      WEBMAIL_SNS_TOPIC_ARN: arn:aws:sns:eu-west-1:000000000000:peer-test
+      WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
+    volumes:
+      - ./data/peer.test:/data
+      - ./domain/peer.test/federation.json:/etc/webmail/federation.json:ro
+      - ./keys:/etc/webmail/keys:ro
+      - ./clock:/etc/webmail/clock:ro
+      - ./certs:/etc/webmail/certs:ro
+    networks:
+      dom-peer:
+        aliases: [api]
+      federation:
+
+  web-peer:
+    labels:
+      webmail.domain: peer.test
+    <<: *web
+    environment:
+      WEBMAIL_DOMAIN: peer.test
+    volumes:
+      - ./nginx/webmail.conf.template:/etc/nginx/templates/webmail.conf.template:ro
+      - ./domain/peer.test:/etc/nginx/domain:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      api-peer:
+        condition: service_healthy
+    networks:
+      dom-peer:
+      federation:
+        aliases: [webmail.peer.test]
+
   # ── Shared ─────────────────────────────────────────────────────────────────
+  # Every Domain's federation inbound endpoint goes through here, and is
+  # passed to that Domain's API unchanged unless a story arms a fault: a lost
+  # answer, or a refusal the API did not give. Its controls are at
+  # http://127.0.0.1:8026/faults (deploy/faults).
+  faults:
+    build:
+      context: ..
+      dockerfile: deploy/faults.Dockerfile
+    image: webmail-faults:local
+    restart: unless-stopped
+    environment:
+      FAULTS_UPSTREAMS: >-
+        103mail.com=api-103mail:8080,example.com=api-example:8080,mail.acme.test=api-acme:8080,acme.test=api-parent:8080,peer.test=api-peer:8080
+    ports:
+      - "127.0.0.1:8026:8026"
+    networks:
+      federation:
+        aliases: [faults]
+
+
   # Stands in for SNS for every Domain, so notification email is captured
   # rather than sent. The end-to-end stories read it at
   # http://127.0.0.1:8025/messages to find invitations and to prove that no
@@ -442,6 +510,8 @@ networks:
   dom-acme:
     internal: true
   dom-parent:
+    internal: true
+  dom-peer:
     internal: true
   federation:
 

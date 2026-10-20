@@ -12,3 +12,8 @@ seed/*.sql
 data/
 # The clock offset the end-to-end suite moves forward.
 clock/
+
+# A Domain's federation config as an end-to-end story changed it (an
+# allowlist, a smaller attachment cap, a rotated key), mounted through
+# FEDERATION_CONFIG_<DOMAIN>. The harness removes it after the story.
+domain/*/federation.e2e.json

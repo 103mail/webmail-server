@@ -16,7 +16,7 @@ server {
     ssl_protocols       TLSv1.2 TLSv1.3;
 
     root /usr/share/nginx/html;
-    client_max_body_size 32m;   # matches WEBMAIL_MAX_BODY_BYTES
+    client_max_body_size 48m;   # matches WEBMAIL_MAX_BODY_BYTES
 
     # Docker's embedded DNS, with upstreams held in variables. nginx resolves a
     # literal proxy_pass host once at start-up, so restarting the API container
@@ -39,6 +39,20 @@ server {
         set $wellknown_upstream http://api:8080;
         proxy_pass $wellknown_upstream$request_uri;
         proxy_set_header Host $host;
+    }
+
+    # Federation inbound goes through the fault proxy, which passes it to this
+    # Domain's API unless an end-to-end story has armed a fault (deploy/faults).
+    # The body limit is the API's to enforce: it answers 413 too_large, which
+    # a peer can read, where nginx would answer with a page.
+    location = /api/v1/federation/inbound {
+        set $faults_upstream http://faults:8080;
+        proxy_pass $faults_upstream$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header Host            $host;
+        proxy_set_header X-Faults-Domain ${WEBMAIL_DOMAIN};
+        proxy_set_header X-Real-IP       $remote_addr;
+        proxy_read_timeout 60s;
     }
 
     location /api/ {

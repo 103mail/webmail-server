@@ -1,0 +1,9 @@
+{
+  "domain": "peer.test",
+  "apiBase": "https://webmail.peer.test/api/v1",
+  "brand": {
+    "name": "Test Peer",
+    "logo": "/mail.svg",
+    "marketingUrl": "https://peer.test"
+  }
+}
