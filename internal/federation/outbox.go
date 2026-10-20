@@ -458,3 +458,52 @@ func nullableDetail(detail string) any {
 	}
 	return detail
 }
+
+// OutboxEntry is one outbox row as an operator sees it: where it is going,
+// for whom, and how far it got. It carries no message content.
+type OutboxEntry struct {
+	ID           int64      `json:"id"`
+	Kind         string     `json:"kind"`
+	PeerDomain   string     `json:"peerDomain"`
+	OriginDomain string     `json:"originDomain"`
+	Recipients   []string   `json:"recipients"`
+	Status       string     `json:"status"`
+	Attempts     int        `json:"attempts"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	DeliveredAt  *time.Time `json:"deliveredAt"`
+}
+
+// Outbox lists the outbox, oldest first. Delivered rows stay listed until
+// Sweep removes them.
+func (s *Service) Outbox(ctx context.Context) ([]OutboxEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT "id", "kind", "peer_domain", "origin_domain", "body", "status", "attempts", `+
+			`"created_at", "delivered_at" FROM "federation_outbox" ORDER BY "id"`)
+	if err != nil {
+		return nil, fmt.Errorf("list outbox: %w", err)
+	}
+	defer rows.Close()
+	entries := []OutboxEntry{}
+	for rows.Next() {
+		var e OutboxEntry
+		var body string
+		var delivered sql.NullTime
+		if err := rows.Scan(&e.ID, &e.Kind, &e.PeerDomain, &e.OriginDomain, &body, &e.Status,
+			&e.Attempts, &e.CreatedAt, &delivered); err != nil {
+			return nil, fmt.Errorf("scan outbox row: %w", err)
+		}
+		if delivered.Valid {
+			e.DeliveredAt = &delivered.Time
+		}
+		// Only the recipients are read out of the stored envelope.
+		var envelope struct {
+			Recipients []string `json:"recipients"`
+		}
+		if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+			return nil, fmt.Errorf("read recipients of outbox row %d: %w", e.ID, err)
+		}
+		e.Recipients = envelope.Recipients
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}

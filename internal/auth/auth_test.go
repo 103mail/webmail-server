@@ -62,3 +62,40 @@ func TestLoginAndAuthorize(t *testing.T) {
 		t.Errorf("CurrentUser = %+v, %v", u, err)
 	}
 }
+
+func TestAccountsListEveryAddress(t *testing.T) {
+	db := storetest.Open(t)
+	ctx := context.Background()
+	customerID, err := store.Insert(ctx, db, `INSERT INTO "customer" ("name") VALUES (?)`, "Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	userID, err := store.Insert(ctx, db,
+		`INSERT INTO "user" ("customer_id", "username", "password", "name") VALUES (?,?,?,?)`,
+		customerID, "alice@example.test", "", "Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailboxID, err := store.Insert(ctx, db,
+		`INSERT INTO "mailbox" ("customer_id", "name", "color") VALUES (?,?,?)`, customerID, "Alice", "red")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range []string{"alice@example.test", "1234567@example.test"} {
+		if _, err := store.Insert(ctx, db,
+			`INSERT INTO "alias" ("customer_id", "email", "name", "mailbox_id") VALUES (?,?,?,?)`,
+			customerID, address, "Alice", mailboxID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	accounts, err := New(db).Accounts(ctx)
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("Accounts = %+v, %v", accounts, err)
+	}
+	a := accounts[0]
+	if a.UserID != userID || a.CustomerID != customerID || a.Username != "alice@example.test" ||
+		len(a.Addresses) != 2 || a.Addresses[0] != "1234567@example.test" || a.Addresses[1] != "alice@example.test" {
+		t.Errorf("account = %+v", a)
+	}
+}

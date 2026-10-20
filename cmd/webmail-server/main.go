@@ -173,13 +173,30 @@ func run(log *slog.Logger) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	errs := make(chan error, 1)
+	errs := make(chan error, 2)
 	go func() {
 		log.Info("listening", "addr", cfg.Addr)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs <- err
 		}
 	}()
+
+	// The end-to-end test controls get a listener of their own, so they can
+	// never be reached through the public hostname (ADR 20).
+	var controlServer *http.Server
+	if cfg.ControlAddr != "" {
+		controlServer = &http.Server{
+			Addr:              cfg.ControlAddr,
+			Handler:           server.ControlHandler(),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			log.Warn("serving the end-to-end test controls", "addr", cfg.ControlAddr)
+			if err := controlServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errs <- err
+			}
+		}()
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -192,5 +209,8 @@ func run(log *slog.Logger) error {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer shutdownCancel()
+	if controlServer != nil {
+		controlServer.Shutdown(shutdownCtx)
+	}
 	return httpServer.Shutdown(shutdownCtx)
 }

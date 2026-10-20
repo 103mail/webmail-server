@@ -183,6 +183,14 @@ To read what every Domain has sent, newest last:
 `?after=N` lists only what came after message N. The sink keeps messages in
 memory, so restarting it empties it.
 
+**Test controls are on.** Each API serves the read-only controls of ADR 20 on
+port 8081 of its Domain's loopback address, for the end-to-end suite:
+
+    curl http://webmail.example.com:8081/control/envelopes
+    curl http://webmail.example.com:8081/control/accounts
+
+A production deployment must not set `WEBMAIL_CONTROL_ADDR`.
+
 ## Checking it works
 
     curl --cacert certs/webmail-local-ca.crt https://webmail.103mail.com/health

@@ -65,8 +65,13 @@ services:
       <<: *api-env
       WEBMAIL_ALLOWED_ORIGINS: https://webmail.103mail.com
       WEBMAIL_SNS_TOPIC_ARN: arn:aws:sns:eu-west-1:000000000000:103mail-com
+      WEBMAIL_CONTROL_ADDR: ":8081"
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
       WEBMAIL_WS_PUSH_URL: http://ws:7001
+    # The read-only end-to-end test controls (ADR 20), on this Domain's own
+    # loopback address like its web container.
+    ports:
+      - "127.0.0.1:8081:8081"
     volumes:
       - ./data/103mail.com:/data
       - ./domain/103mail.com/federation.json:/etc/webmail/federation.json:ro
@@ -146,8 +151,13 @@ services:
       <<: *api-env
       WEBMAIL_ALLOWED_ORIGINS: https://webmail.example.com
       WEBMAIL_SNS_TOPIC_ARN: arn:aws:sns:eu-west-1:000000000000:example-com
+      WEBMAIL_CONTROL_ADDR: ":8081"
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
       WEBMAIL_WS_PUSH_URL: http://ws:7001
+    # The read-only end-to-end test controls (ADR 20), on this Domain's own
+    # loopback address like its web container.
+    ports:
+      - "127.0.0.2:8081:8081"
     volumes:
       - ./data/example.com:/data
       - ./domain/example.com/federation.json:/etc/webmail/federation.json:ro
@@ -229,7 +239,12 @@ services:
       <<: *api-env
       WEBMAIL_ALLOWED_ORIGINS: https://webmail.mail.acme.test
       WEBMAIL_SNS_TOPIC_ARN: arn:aws:sns:eu-west-1:000000000000:mail-acme-test
+      WEBMAIL_CONTROL_ADDR: ":8081"
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
+    # The read-only end-to-end test controls (ADR 20), on this Domain's own
+    # loopback address like its web container.
+    ports:
+      - "127.0.0.3:8081:8081"
     volumes:
       - ./data/mail.acme.test:/data
       - ./domain/mail.acme.test/federation.json:/etc/webmail/federation.json:ro

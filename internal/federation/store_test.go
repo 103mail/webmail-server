@@ -212,3 +212,33 @@ func TestReplayAndDedup(t *testing.T) {
 		t.Fatalf("alreadyAccepted = %v, %v", seen, err)
 	}
 }
+
+func TestOutboxListsWhereEachEnvelopeWent(t *testing.T) {
+	db := storetest.Open(t)
+	now := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	db.Clock = func() time.Time { return now }
+	ctx := context.Background()
+	s := newStoreService(t, db)
+	enqueue(t, s, "peer.test", 1)
+	enqueue(t, s, "other.test", 1)
+	claimed, err := s.claim(ctx, "peer.test", 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %+v, %v", claimed, err)
+	}
+	s.finish(ctx, claimed[0], "delivered", 202, "")
+
+	entries, err := s.Outbox(ctx)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("Outbox = %+v, %v", entries, err)
+	}
+	delivered, pending := entries[0], entries[1]
+	if delivered.PeerDomain != "peer.test" || delivered.Kind != "envelope" ||
+		delivered.Status != "delivered" || delivered.DeliveredAt == nil ||
+		len(delivered.Recipients) != 1 || delivered.Recipients[0] != "bob@peer.test" {
+		t.Errorf("delivered entry = %+v", delivered)
+	}
+	if pending.PeerDomain != "other.test" || pending.Status != "pending" || pending.DeliveredAt != nil ||
+		!pending.CreatedAt.Equal(now) {
+		t.Errorf("pending entry = %+v", pending)
+	}
+}

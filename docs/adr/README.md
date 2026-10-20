@@ -28,3 +28,4 @@ rewrite.
 | [17](0017-implementing-webmail-federation.md) | Implementing Webmail-Federation | webmail-federation |
 | [18](0018-the-ws2api-chat-bridge.md) | The ws2api chat bridge | ws2api |
 | [19](0019-postgresql-in-production-sqlite-under-test.md) | PostgreSQL in production, SQLite under test | |
+| [20](0020-read-only-controls-for-the-end-to-end-suite.md) | Read-only controls for the end-to-end suite | webmail-e2e |

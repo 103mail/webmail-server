@@ -176,3 +176,58 @@ func newTokenValue() (string, error) {
 	}
 	return hex.EncodeToString(buf), nil
 }
+
+// Account is a user and every address that reaches its customer's mailboxes.
+type Account struct {
+	UserID     int64    `json:"userId"`
+	CustomerID int64    `json:"customerId"`
+	Username   string   `json:"username"`
+	Addresses  []string `json:"addresses"`
+}
+
+// Accounts lists every user on this Server with their addresses, sorted.
+func (s *Service) Accounts(ctx context.Context) ([]Account, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT "id", "customer_id", "username" FROM "user" ORDER BY "id"`)
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	accounts := []Account{}
+	for rows.Next() {
+		a := Account{Addresses: []string{}}
+		if err := rows.Scan(&a.UserID, &a.CustomerID, &a.Username); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan user: %w", err)
+		}
+		accounts = append(accounts, a)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+
+	rows, err = s.db.QueryContext(ctx,
+		`SELECT "customer_id", "email" FROM "alias" ORDER BY "email"`)
+	if err != nil {
+		return nil, fmt.Errorf("list aliases: %w", err)
+	}
+	defer rows.Close()
+	byCustomer := map[int64][]string{}
+	for rows.Next() {
+		var customerID int64
+		var address string
+		if err := rows.Scan(&customerID, &address); err != nil {
+			return nil, fmt.Errorf("scan alias: %w", err)
+		}
+		byCustomer[customerID] = append(byCustomer[customerID], address)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list aliases: %w", err)
+	}
+	for i := range accounts {
+		if addresses := byCustomer[accounts[i].CustomerID]; addresses != nil {
+			accounts[i].Addresses = addresses
+		}
+	}
+	return accounts, nil
+}

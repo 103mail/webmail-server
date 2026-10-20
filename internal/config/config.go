@@ -37,6 +37,9 @@ type Config struct {
 	OutboundTopicARN string
 	// SNSRegion is the region that topic lives in. Empty means SESRegion.
 	SNSRegion string
+	// ControlAddr is where the read-only end-to-end test controls listen
+	// (ADR 20). Empty, the default, means they are not served at all.
+	ControlAddr string
 }
 
 // Load reads the configuration, applying defaults suited to development.
@@ -52,6 +55,7 @@ func Load() (*Config, error) {
 		SESRegion:        os.Getenv("WEBMAIL_SES_REGION"),
 		OutboundTopicARN: os.Getenv("WEBMAIL_SNS_TOPIC_ARN"),
 		SNSRegion:        os.Getenv("WEBMAIL_SNS_REGION"),
+		ControlAddr:      os.Getenv("WEBMAIL_CONTROL_ADDR"),
 	}
 	if c.SNSRegion == "" {
 		c.SNSRegion = c.SESRegion
