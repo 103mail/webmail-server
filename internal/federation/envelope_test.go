@@ -137,7 +137,7 @@ func TestRecipientsMustBeOnTheDestination(t *testing.T) {
 		t.Errorf("recipients on the Destination were refused: %v", r)
 	}
 	e.Recipients = []string{"bob@example.com", "erin@mail.acme.test"}
-	if r := e.RecipientsOn("example.com"); r == nil || r.Status != 400 || r.Code != ErrSchemaViolation {
+	if r := e.RecipientsOn("example.com"); r == nil || r.Status != 400 || r.Code != ErrNotRegistrar {
 		t.Errorf("a recipient on another Domain was accepted: %v", r)
 	}
 	// A parent is not its subdomain (RFC 4.1.1).

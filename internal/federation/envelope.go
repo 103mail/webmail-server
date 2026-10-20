@@ -95,6 +95,7 @@ const (
 	ErrStaleRequest        = "stale_request"
 	ErrPeerNotAllowed      = "peer_not_allowed"
 	ErrNoRecipients        = "no_recipients"
+	ErrNotRegistrar        = "not_registrar"
 	ErrTooLarge            = "too_large"
 	ErrUnsupportedMedia    = "unsupported_media_type"
 	ErrRateLimited         = "rate_limited"
@@ -223,10 +224,12 @@ func (e *Envelope) Members() []string {
 
 // RecipientsOn checks that every recipient is on the Destination's own DNS
 // domain. A parent and its subdomain are different Domains (RFC 4.1.1, 5.3).
+// Any other address is refused as not_registrar, External or not: only a
+// Registrar accepts addresses that are not its own (RFC 8.2).
 func (e *Envelope) RecipientsOn(domain string) *Rejection {
 	for _, address := range e.Recipients {
 		if !strings.EqualFold(DomainOf(address), domain) {
-			return reject(400, ErrSchemaViolation, "recipient "+address+" is not on "+domain)
+			return reject(400, ErrNotRegistrar, "recipient "+address+" is not on "+domain)
 		}
 	}
 	return nil
