@@ -24,7 +24,8 @@
 #
 # Host ports: each web container binds :443 on its own loopback address, so
 # every Domain keeps the RFC's URLs with no port suffix. Requires the /etc/hosts
-# entries in deploy/README.md.
+# entries in deploy/README.md, for the browser only: the end-to-end suite runs
+# on the federation network and resolves every name through Docker.
 
 name: webmail
 
@@ -78,8 +79,9 @@ services:
       WEBMAIL_CONTROL_ADDR: ":8081"
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
       WEBMAIL_WS_PUSH_URL: http://ws:7001
-    # The read-only end-to-end test controls (ADR 20), on this Domain's own
-    # loopback address like its web container.
+    # The read-only end-to-end test controls (ADR 20). The suite reaches them
+    # at control.webmail.103mail.com on the federation network; the host port is
+    # for curl.
     ports:
       - "127.0.0.1:8081:8081"
     volumes:
@@ -92,6 +94,7 @@ services:
       dom-103mail:
         aliases: [api]
       federation:
+        aliases: [control.webmail.103mail.com]
 
   web-103mail:
     labels:
@@ -178,8 +181,9 @@ services:
       WEBMAIL_CONTROL_ADDR: ":8081"
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
       WEBMAIL_WS_PUSH_URL: http://ws:7001
-    # The read-only end-to-end test controls (ADR 20), on this Domain's own
-    # loopback address like its web container.
+    # The read-only end-to-end test controls (ADR 20). The suite reaches them
+    # at control.webmail.example.com on the federation network; the host port is
+    # for curl.
     ports:
       - "127.0.0.2:8081:8081"
     volumes:
@@ -192,6 +196,7 @@ services:
       dom-example:
         aliases: [api]
       federation:
+        aliases: [control.webmail.example.com]
 
   web-example:
     labels:
@@ -279,8 +284,9 @@ services:
       WEBMAIL_SNS_TOPIC_ARN: arn:aws:sns:eu-west-1:000000000000:mail-acme-test
       WEBMAIL_CONTROL_ADDR: ":8081"
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
-    # The read-only end-to-end test controls (ADR 20), on this Domain's own
-    # loopback address like its web container.
+    # The read-only end-to-end test controls (ADR 20). The suite reaches them
+    # at control.webmail.mail.acme.test on the federation network; the host port is
+    # for curl.
     ports:
       - "127.0.0.3:8081:8081"
     volumes:
@@ -293,6 +299,7 @@ services:
       dom-acme:
         aliases: [api]
       federation:
+        aliases: [control.webmail.mail.acme.test]
 
   web-acme:
     labels:
@@ -357,8 +364,9 @@ services:
       WEBMAIL_SNS_TOPIC_ARN: arn:aws:sns:eu-west-1:000000000000:acme-test
       WEBMAIL_CONTROL_ADDR: ":8081"
       WEBMAIL_FEDERATION_CONFIG: /etc/webmail/federation.json
-    # The read-only end-to-end test controls (ADR 20), on this Domain's own
-    # loopback address like its web container.
+    # The read-only end-to-end test controls (ADR 20). The suite reaches them
+    # at control.webmail.acme.test on the federation network; the host port is
+    # for curl.
     ports:
       - "127.0.0.4:8081:8081"
     volumes:
@@ -371,6 +379,7 @@ services:
       dom-parent:
         aliases: [api]
       federation:
+        aliases: [control.webmail.acme.test]
 
   web-parent:
     labels:
@@ -469,7 +478,8 @@ services:
   # Every Domain's federation inbound endpoint goes through here, and is
   # passed to that Domain's API unchanged unless a story arms a fault: a lost
   # answer, or a refusal the API did not give. Its controls are at
-  # http://127.0.0.1:8026/faults (deploy/faults).
+  # http://faults:8026/faults on the federation network, and on host port 8026
+  # for curl (deploy/faults).
   faults:
     build:
       context: ..
@@ -488,8 +498,9 @@ services:
 
   # Stands in for SNS for every Domain, so notification email is captured
   # rather than sent. The end-to-end stories read it at
-  # http://127.0.0.1:8025/messages to find invitations and to prove that no
-  # message content left any Domain by email.
+  # http://mailsink:4566/messages on the federation network (host port 8025)
+  # to find invitations and to prove that no message content left any Domain
+  # by email.
   mailsink:
     build:
       context: ..

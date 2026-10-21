@@ -54,6 +54,10 @@ Then, once per machine:
        127.0.0.3  webmail.mail.acme.test
        127.0.0.4  webmail.acme.test
 
+   Only the browser and `curl` on the host need these. The end-to-end suite
+   runs in a container on the stack's network and resolves every hostname
+   through Docker (`../webmail-e2e/run.sh`).
+
 2. Trust `deploy/certs/webmail-local-ca.crt` in the browser. Chrome: Settings,
    Privacy and security, Security, Manage certificates, Authorities, Import.
    Firefox has its own store under Settings, Privacy & Security, Certificates,

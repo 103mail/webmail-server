@@ -89,7 +89,10 @@ Then, once:
        127.0.0.4  webmail.acme.test
 
    The whole of `127.0.0.0/8` is loopback on Linux, which is what lets every
-   Domain have port 443 to itself and keep URLs with no port suffix.
+   Domain have port 443 to itself and keep URLs with no port suffix. Only the
+   browser and `curl` on the host need these. The end-to-end suite runs in a
+   container on the `federation` network and resolves every hostname through
+   Docker (`../../webmail-e2e/run.sh`).
 
 2. Trust `certs/webmail-local-ca.crt` in your browser. In Chrome that is
    Settings, Privacy and security, Security, Manage certificates, Authorities,
@@ -203,7 +206,9 @@ To read what every Domain has sent, newest last:
 memory, so restarting it empties it.
 
 **Test controls are on.** Each API serves the read-only controls of ADR 20 on
-port 8081 of its Domain's loopback address, for the end-to-end suite:
+port 8081, for the end-to-end suite. The suite reaches them on the
+`federation` network at `control.webmail.{domain}`, an alias of the Domain's
+API; the same port is published on the Domain's loopback address for `curl`:
 
     curl http://webmail.example.com:8081/control/envelopes
     curl http://webmail.example.com:8081/control/accounts
