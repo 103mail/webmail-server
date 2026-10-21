@@ -33,8 +33,9 @@ still runs on PHP until the cutover.
 - HTTP JSON API for auth, mail, calendar, chat and attachments, replacing
   `pages/api/v1/` and `lib/Public/` in the PHP repo.
 - `deploy/` runs four independent Domains locally (103mail.com, example.com,
-  mail.acme.test and its parent acme.test) that federate with each other; see
-  `deploy/README.md`.
+  mail.acme.test and its parent acme.test) that federate with each other, plus
+  the scripted test peer peer.test, a fault proxy and the test controls the
+  end-to-end stories use; see `deploy/README.md`.
 - Federation endpoints from the RFC: `GET /.well-known/webmail-federation` and
   `POST /api/v1/federation/inbound`.
 - Background workers for scheduled work: digests, reminders, retention purges and

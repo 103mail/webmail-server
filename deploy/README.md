@@ -12,6 +12,11 @@ and its own hostname, and none can reach another's data.
 | Password | `password` | `password` | `password` | `password` |
 | Data | a dump of your local `webmail` database | generated fixtures | generated fixtures | generated fixtures |
 
+A fifth Domain, `peer.test`, is the scripted peer of the end-to-end stories:
+an API and nginx with no accounts anyone signs in to and no host ports. The
+stories sign envelopes with its key and send forged, replayed and malformed
+traffic as it.
+
 mail.acme.test is a Domain on a subdomain (RFC 4.1.1), and acme.test is its
 parent, a separate Domain that shares nothing with it. Both are there for the
 end-to-end stories in `../../webmail-e2e`, and neither has a chat proxy,
@@ -163,6 +168,14 @@ because it holds no key material. The peer descriptor at
 `/.well-known/webmail-federation` is rendered by the server from the key it
 actually signs with, so the two cannot drift apart.
 
+Each Domain advertises envelopes up to 36 MiB and attachments up to 25 MiB
+(`maxEnvelopeBytes`, `maxAttachmentBytes`), and the API and nginx take request
+bodies up to 48 MiB, so a file at the attachment limit fits on the wire in
+base64. A file over the limit is refused when it is written, and one over a
+peer's limit is bounced as `too_large` before it is sent (ADR 21).
+
+To rotate a Domain's key, follow `../docs/runbooks/key-rotation.md`.
+
 Only the Basic tier of the protocol is implemented. The Registrar extension and
 everything built on it (shadow mailboxes, real-email addressing) is not, and
 these Domains advertise `"registrar": false`.
@@ -194,6 +207,9 @@ port 8081 of its Domain's loopback address, for the end-to-end suite:
 
     curl http://webmail.example.com:8081/control/envelopes
     curl http://webmail.example.com:8081/control/accounts
+    curl http://webmail.example.com:8081/control/peers
+    curl "http://webmail.example.com:8081/control/files?md5=..."
+    curl "http://webmail.example.com:8081/control/threads?member=bob@example.com"
 
 A production deployment must not set `WEBMAIL_CONTROL_ADDR`.
 
@@ -207,6 +223,18 @@ shorter than 72 hours is not conformant (RFC 6.4) and is for testing only. The
 workers check every 10 seconds whether a peer they owe messages to is back
 (`WEBMAIL_BACKFILL_PROBE`), where production uses 5 minutes, and drain their
 outbox every second.
+
+**Faults can be staged.** Every Domain's nginx sends
+`/api/v1/federation/inbound` through the `faults` container (`faults/`), which
+passes it to that Domain's API unchanged unless a story arms a rule at
+`http://127.0.0.1:8026/faults`: lose the answer to the next envelope, or
+refuse with a given status and code. `DELETE /faults` clears every rule.
+
+**A Domain's federation config can be swapped.** The api and worker of each
+Domain mount `${FEDERATION_CONFIG_<DOMAIN>:-./domain/<domain>/federation.json}`.
+A story writes a changed copy as `domain/<domain>/federation.e2e.json` (an
+allowlist, a smaller attachment limit, a rotated key), recreates the two
+containers with the variable set, and puts the original back afterwards.
 
 **Time can be moved forward.** Every API and worker reads the time as the real
 clock plus the offset in `clock/offset` (`WEBMAIL_CLOCK_FILE`), which

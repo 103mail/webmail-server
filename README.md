@@ -15,15 +15,15 @@ and [docs/adr/](docs/adr/) for the decisions behind them.
 With no configuration it serves from `data/webmail.db`, an SQLite file it
 creates, schema included, on first start.
 
-For a full local stack instead, `deploy/` brings up two independent Domains
-(`webmail.103mail.com` and `webmail.example.com`), each with its own database,
-API process and hostname, serving the client bundle from
-`../webmail-client`:
+For a full local stack instead, `deploy/` brings up four independent Domains
+(103mail.com, example.com, mail.acme.test and acme.test) and the scripted test
+peer peer.test, each with its own database, API process and hostname, serving
+the client bundle from `../webmail-client`. They federate with each other:
 
     cd deploy && ./setup.sh && docker compose up -d --build
 
-See [deploy/README.md](deploy/README.md) for the hosts entries it needs and for
-what the topology does not yet do, federation above all.
+See [deploy/README.md](deploy/README.md) for the hosts entries it needs, the
+test controls it carries, and what it does not do.
 
 Configuration comes from the environment:
 
