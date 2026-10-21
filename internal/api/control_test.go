@@ -14,6 +14,7 @@ import (
 	"github.com/mevdschee/webmail-server/internal/blob"
 	"github.com/mevdschee/webmail-server/internal/config"
 	"github.com/mevdschee/webmail-server/internal/email"
+	"github.com/mevdschee/webmail-server/internal/federation"
 	"github.com/mevdschee/webmail-server/internal/store"
 	"github.com/mevdschee/webmail-server/internal/store/storetest"
 )
@@ -101,5 +102,25 @@ func TestControlsShowFilesAndThreads(t *testing.T) {
 	get(t, h, "/control/peers", http.StatusOK, &peers)
 	if peers == nil || len(peers) != 0 {
 		t.Errorf("peers = %v, want an empty list without federation", peers)
+	}
+}
+
+// A 429 tells the peer how long to wait, in the header and in the body
+// (RFC 6.3, 6.4).
+func TestRateLimitedAnswerSaysHowLong(t *testing.T) {
+	s := New(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil,
+		nil, nil, nil, nil, nil, nil, nil)
+	rec := httptest.NewRecorder()
+	s.rejectFederation(rec, httptest.NewRequest(http.MethodPost, "/api/v1/federation/inbound", nil),
+		&federation.Rejection{Status: 429, Code: federation.ErrRateLimited, RetryAfter: 42})
+	if rec.Code != 429 || rec.Header().Get("Retry-After") != "42" {
+		t.Errorf("answered %d with Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	var body struct {
+		Error             string `json:"error"`
+		RetryAfterSeconds int    `json:"retry_after_seconds"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Error != "rate_limited" || body.RetryAfterSeconds != 42 {
+		t.Errorf("body %s, %v", rec.Body, err)
 	}
 }

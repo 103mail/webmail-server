@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/mevdschee/webmail-server/internal/federation"
 )
@@ -89,9 +90,14 @@ func (s *Server) rejectFederation(w http.ResponseWriter, r *http.Request, reject
 		"path", r.URL.Path, "sender", r.Header.Get("X-Federation-Sender"),
 		"status", rejection.Status, "code", rejection.Code, "detail", rejection.Detail)
 
-	body := map[string]string{"error": rejection.Code}
+	body := map[string]any{"error": rejection.Code}
 	if rejection.Detail != "" {
 		body["detail"] = rejection.Detail
+	}
+	// How long to wait, in the header and mirrored in the body (RFC 6.3).
+	if rejection.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(rejection.RetryAfter))
+		body["retry_after_seconds"] = rejection.RetryAfter
 	}
 	s.respondJSON(w, rejection.Status, body)
 }

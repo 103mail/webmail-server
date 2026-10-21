@@ -50,6 +50,11 @@ const (
 	RetryCap    = time.Hour
 	RetryBudget = 72 * time.Hour
 
+	// The limits a Domain applies to one peer's inbound envelopes when its
+	// configuration names none (RFC 9.10).
+	DefaultPerMinute = 120
+	DefaultPerDay    = 20000
+
 	// BackfillProbe is how often a peer that is owed messages is checked
 	// for being back. It is ours, not the RFC's (RFC 6.4).
 	BackfillProbe = 5 * time.Minute
@@ -119,6 +124,15 @@ type Config struct {
 	// conformant (RFC 6.4). BackfillProbe comes from WEBMAIL_BACKFILL_PROBE.
 	RetryBudget   time.Duration `json:"-"`
 	BackfillProbe time.Duration `json:"-"`
+	// RateLimit caps how many envelopes one peer may have accepted here per
+	// minute and per day (RFC 9.10). Zero takes the default.
+	RateLimit RateLimit `json:"rateLimit"`
+}
+
+// RateLimit is the per-peer inbound limit.
+type RateLimit struct {
+	PerMinute int `json:"perMinute"`
+	PerDay    int `json:"perDay"`
 }
 
 // durationFromEnv reads a Go duration such as "2m" from the environment.
@@ -340,6 +354,12 @@ func New(db *store.DB, cfg *Config, log *slog.Logger, deliverer Deliverer) (*Ser
 		}
 		if cfg.BackfillProbe <= 0 {
 			cfg.BackfillProbe = BackfillProbe
+		}
+		if cfg.RateLimit.PerMinute <= 0 {
+			cfg.RateLimit.PerMinute = DefaultPerMinute
+		}
+		if cfg.RateLimit.PerDay <= 0 {
+			cfg.RateLimit.PerDay = DefaultPerDay
 		}
 	}
 	s := &Service{db: db, cfg: cfg, log: log, deliverer: deliverer, local: map[string]*LocalDomain{},

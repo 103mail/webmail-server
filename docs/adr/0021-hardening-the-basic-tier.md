@@ -40,7 +40,8 @@ in `../webmail-e2e` (M1, stories 03, 06, 07, 08 and 09) ran into:
 ## Consequences
 
 - ADR 17's gap "key rotation is supported on the receiving side only" is
-  closed. Its other gaps stand: inbound rate limiting is not built, and
+  closed, and so is the one about inbound rate limiting: a peer is answered
+  `429` with `Retry-After` past its limit per minute or per day (RFC 9.10).
   `in_reply_to` naming the thread is now intended (RFC 5.5).
 - A bounce's `Reason:` line is a wire code, which the end-to-end stories
   compare exactly.

@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/mevdschee/webmail-server/internal/store"
 )
 
 // Request is one inbound POST, reduced to what the protocol authenticates: the
@@ -191,6 +193,11 @@ func (s *Service) Receive(ctx context.Context, req *Request) (*Accepted, *Reject
 		return accepted(envelope.EnvelopeID, refused), nil
 	}
 
+	// A replay above was answered whatever the rate; a new envelope counts.
+	if r := s.rateLimited(ctx, req.Sender); r != nil {
+		return nil, r
+	}
+
 	delivered, refused, err := s.deliverer.DeliverInbound(ctx, *inbound)
 	if errors.Is(err, ErrNotMember) {
 		// Not recorded as accepted, so an Origin whose invitation was only
@@ -294,6 +301,43 @@ func (s *Service) alreadyAccepted(ctx context.Context, sender, envelopeID string
 		return false, fmt.Errorf("look up accepted envelope: %w", err)
 	}
 	return true, nil
+}
+
+// rateLimited answers 429 when a peer has had as many envelopes accepted here
+// as its limit allows, over the last minute or the last day, with how many
+// seconds remain until the oldest of them falls out of the window. Counting
+// accepted envelopes on this Domain's clock means a peer is never charged for
+// what it was refused (RFC 9.10).
+func (s *Service) rateLimited(ctx context.Context, sender string) *Rejection {
+	now := s.db.Now()
+	for _, window := range []struct {
+		limit  int
+		period time.Duration
+	}{
+		{s.cfg.RateLimit.PerMinute, time.Minute},
+		{s.cfg.RateLimit.PerDay, 24 * time.Hour},
+	} {
+		var count int
+		var oldest store.NullTime
+		err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*), MIN("received_at") FROM "federation_inbox" `+
+				`WHERE "sender_domain" = ? AND "received_at" > ?`,
+			sender, now.Add(-window.period)).Scan(&count, &oldest)
+		if err != nil {
+			return reject(500, ErrServerError, "could not count the peer's envelopes")
+		}
+		if count < window.limit || !oldest.Valid {
+			continue
+		}
+		wait := int(oldest.Time.Add(window.period).Sub(now).Seconds())
+		if wait < 1 {
+			wait = 1
+		}
+		r := reject(429, ErrRateLimited, fmt.Sprintf("more than %d envelopes in %s", window.limit, window.period))
+		r.RetryAfter = wait
+		return r
+	}
+	return nil
 }
 
 func (s *Service) recordAccepted(ctx context.Context, sender, envelopeID string) error {

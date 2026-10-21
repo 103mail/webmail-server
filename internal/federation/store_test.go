@@ -527,3 +527,58 @@ func TestPeersListsPinnedKeys(t *testing.T) {
 		t.Errorf("peers = %+v, want only mail.peer.test with its keys", peers)
 	}
 }
+
+// A peer that sends too much is answered 429 with how long to wait, counted
+// per sender over the last minute and the last day, from envelopes accepted
+// on this Domain's clock. Other peers are not affected (RFC 9.10).
+func TestInboundRateLimitPerSender(t *testing.T) {
+	db := storetest.Open(t)
+	now := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	db.Clock = func() time.Time { return now }
+	ctx := context.Background()
+	s := newStoreService(t, db)
+	s.cfg.RateLimit = RateLimit{PerMinute: 3, PerDay: 5}
+
+	accept := func(sender string, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := s.recordAccepted(ctx, sender, fmt.Sprintf("%s-%d-%d", sender, now.Unix(), i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	accept("noisy.test", 3)
+	r := s.rateLimited(ctx, "noisy.test")
+	if r == nil || r.Status != 429 || r.Code != ErrRateLimited || r.RetryAfter != 60 {
+		t.Fatalf("after 3 in a minute: %+v, want 429 rate_limited with 60 seconds", r)
+	}
+	if r := s.rateLimited(ctx, "quiet.test"); r != nil {
+		t.Errorf("another peer was limited: %+v", r)
+	}
+
+	now = now.Add(45 * time.Second)
+	if r := s.rateLimited(ctx, "noisy.test"); r == nil || r.RetryAfter != 15 {
+		t.Errorf("45 seconds later: %+v, want 15 seconds left", r)
+	}
+	now = now.Add(16 * time.Second)
+	if r := s.rateLimited(ctx, "noisy.test"); r != nil {
+		t.Errorf("a minute later the peer is still limited: %+v", r)
+	}
+
+	accept("noisy.test", 2)
+	r = s.rateLimited(ctx, "noisy.test")
+	if r == nil || r.Code != ErrRateLimited || r.RetryAfter <= 60 {
+		t.Fatalf("after 5 in a day: %+v, want limited until the first of them is a day old", r)
+	}
+	if want := int((24*time.Hour - 61*time.Second).Seconds()); r.RetryAfter != want {
+		t.Errorf("retry after %d seconds, want %d", r.RetryAfter, want)
+	}
+}
+
+// Without a configured limit a Domain still applies one (RFC 9.10).
+func TestInboundRateLimitHasDefaults(t *testing.T) {
+	s := newStoreService(t, storetest.Open(t))
+	if s.cfg.RateLimit.PerMinute != DefaultPerMinute || s.cfg.RateLimit.PerDay != DefaultPerDay {
+		t.Errorf("rate limit %+v, want the defaults", s.cfg.RateLimit)
+	}
+}

@@ -122,6 +122,8 @@ type Rejection struct {
 	Status int
 	Code   string
 	Detail string
+	// RetryAfter is how many seconds a 429 asks the peer to wait.
+	RetryAfter int
 }
 
 func (r *Rejection) Error() string {
