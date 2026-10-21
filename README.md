@@ -15,15 +15,15 @@ and [docs/adr/](docs/adr/) for the decisions behind them.
 With no configuration it serves from `data/webmail.db`, an SQLite file it
 creates, schema included, on first start.
 
-For a full local stack instead, `deploy/` brings up four independent Domains
+For a full local stack instead, `../webmail-deploy` brings up four independent Domains
 (103mail.com, example.com, mail.acme.test and acme.test) and the scripted test
 peer peer.test, each with its own database, API process and hostname, serving
 the client bundle from `../webmail-client`. They federate with each other:
 
-    cd deploy && ./setup.sh && docker compose up -d --build
+    cd ../webmail-deploy && docker compose up -d --build
 
-See [deploy/README.md](deploy/README.md) for the hosts entries it needs, the
-test controls it carries, and what it does not do.
+Each Domain is then at http://localhost:8001 to 8004. See the README there
+for the test controls it carries and what it does not do.
 
 Configuration comes from the environment:
 
@@ -113,7 +113,7 @@ stateless (ADR 13). The proxy turns a connection into ordinary HTTP against
 | `WEBMAIL_WS_PUSH_URL` | Where the ws2api tier listens. Empty disables fan-out: a message is stored and acknowledged, but the other participants do not see it until they reload |
 
 `/wsoverhttp/` must never be exposed publicly: it is authenticated only by
-knowing a ClientId. The reverse proxy in `deploy/` forwards `/api/` and `/ws/`
+knowing a ClientId. The reverse proxy in `../webmail-deploy` forwards `/api/` and `/ws/`
 and nothing else. ADR 18 has the frame format.
 
 ## Email

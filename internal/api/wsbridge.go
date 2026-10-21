@@ -11,8 +11,9 @@ import (
 //
 // These are NOT public. They are authenticated only by knowing a ClientId,
 // which is what makes them safe for a proxy on a private network and unsafe on
-// the internet. The reverse proxy in deploy/ forwards /api/ and /ws/ and
-// nothing else; /wsoverhttp/ is reachable only from inside the Domain network.
+// the internet. The reverse proxy in ../webmail-deploy forwards /api/ and /ws/
+// and nothing else; /wsoverhttp/ is reachable only from inside the Domain
+// network.
 
 // maxFrameBytes caps a single client frame. Chat is text; anything larger is
 // either a mistake or an attempt to make the server buffer for someone.

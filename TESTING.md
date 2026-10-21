@@ -1,7 +1,7 @@
 # Testing
 
 How to bring the local stack up and check by hand that mail, calendar and chat
-actually work. The stack is the one in [deploy/](deploy/): two independent
+actually work. The stack is the one in `../webmail-deploy`: independent
 Domains, each with its own SQLite database, API process, worker, chat proxy
 and hostname. Testing against it is the closest thing to production short of
 deploying, because it exercises the real client bundle, the real reverse proxy
@@ -14,63 +14,50 @@ under [Automated tests](#automated-tests).
 
 | Needed | Why |
 | --- | --- |
-| Docker with the compose plugin | Everything runs in containers |
-| `openssl` | `setup.sh` generates the CA, the leaf certificates and the federation keys |
-| `sqlite3` and `python3` | `setup.sh` builds each Domain's database with them |
+| Docker with the compose plugin | Everything runs in containers, `setup.sh` included |
+| `../webmail-deploy` | The stack itself |
 | `../webmail-client` | The client bundle is built from it |
-| `../ws2api` | The chat proxy is built from it |
-| A local `webmail` MySQL database | Optional. Seeds the 103mail Domain with real data |
-| `python3` with `websockets` | Optional. Only for `deploy/chatcheck.py` |
+| A local `webmail` MySQL database | Optional. Seeds the 103mail Domain with real data, through `./setup.sh --reseed` on the host |
+| `python3` with `websockets` | Optional. Only for `../webmail-deploy/chatcheck.py` |
 
 The sibling repositories have to be checked out next to this one, because
-compose builds them by relative path.
+compose builds them by relative path. ws2api is built from its public GitHub
+repository.
 
 ## Setting up
 
-    cd deploy
-    ./setup.sh
+    cd ../webmail-deploy
+    docker compose up -d --build
 
-`setup.sh` is idempotent and generates the things that cannot be checked in:
+A `setup` container runs `setup.sh` first. It is idempotent and generates the
+things that cannot be checked in:
 
 - a local CA, plus a leaf certificate for `webmail.103mail.com`,
-  `webmail.example.com`, `webmail.mail.acme.test` and `webmail.acme.test`
+  `webmail.example.com`, `webmail.mail.acme.test` and `webmail.acme.test`,
+  which the Domains use between themselves
 - an Ed25519 federation keypair per Domain, and the `federation.json` that
   names it
-- the seed SQL for every Domain
+- the seed SQL and the SQLite database for every Domain
 - the attachment and document directories
 
-Re-running keeps what already exists, so the CA you trusted stays trusted and
-the peer keys other Domains pinned do not move. Use `./setup.sh --reseed` to
-rebuild only the seed SQL.
+Re-running keeps what already exists, so the peer keys other Domains pinned do
+not move. Use `./setup.sh --reseed` to rebuild the seed SQL and the databases.
 
-Then, once per machine:
+No `/etc/hosts` entries and no trusted CA are needed. The browser reaches each
+Domain over plain HTTP on localhost, which it treats as a secure context:
 
-1. Add the Federation hostnames to `/etc/hosts`. All of `127.0.0.0/8` is
-   loopback on Linux, which is what lets every Domain own port 443 and keep
-   URLs with no port suffix:
+| 103mail.com | example.com | mail.acme.test | acme.test |
+| --- | --- | --- | --- |
+| http://localhost:8001 | http://localhost:8002 | http://localhost:8003 | http://localhost:8004 |
 
-       127.0.0.1  webmail.103mail.com
-       127.0.0.2  webmail.example.com
-       127.0.0.3  webmail.mail.acme.test
-       127.0.0.4  webmail.acme.test
+The Federation hostnames exist only on the stack's `federation` network, where
+the Domains reach each other over TLS.
 
-   Only the browser and `curl` on the host need these. The end-to-end suite
-   runs in a container on the stack's network and resolves every hostname
-   through Docker (`../webmail-e2e/run.sh`).
-
-2. Trust `deploy/certs/webmail-local-ca.crt` in the browser. Chrome: Settings,
-   Privacy and security, Security, Manage certificates, Authorities, Import.
-   Firefox has its own store under Settings, Privacy & Security, Certificates,
-   View Certificates, Authorities. Without this every page load is a warning,
-   and the client's fetches fail rather than prompting.
-
-3. Bring it up:
-
-       docker compose up -d --build
-
-Fifteen containers should come up: an API, a worker and an nginx per Domain,
-a chat proxy for 103mail.com and example.com, and the mail sink. There is no database container; each Domain's database is the file
-`deploy/data/{domain}/webmail.db`, which `setup.sh` built. `docker compose ps` shows them.
+Nineteen containers come up: the one-off `setup`, an API, a worker and an
+nginx per Domain, an API and nginx for the test peer peer.test, a chat proxy
+for 103mail.com and example.com, the fault proxy and the mail sink. There is no
+database container; each Domain's database is the file
+`../webmail-deploy/data/{domain}/webmail.db`. `docker compose ps` shows them.
 
 ## What the seed data contains
 
@@ -78,13 +65,12 @@ The two Domains are seeded differently on purpose.
 
 | | 103mail.com | example.com |
 | --- | --- | --- |
-| URL | `https://webmail.103mail.com` | `https://webmail.example.com` |
-| Loopback | `127.0.0.1` | `127.0.0.2` |
-| Seed | data-only dump of your local `webmail` MySQL database, converted for SQLite | fixtures from `deploy/seed.sh` |
+| URL | http://localhost:8001 | http://localhost:8002 |
+| Seed | data-only dump of your local `webmail` MySQL database, converted for SQLite | fixtures from `../webmail-deploy/seed.sh` |
 | Logins | whatever that database holds | `bob@example.com`, `carol@example.com` |
 | Password | `password` | `password` |
 
-Every account uses `password`, which is what `../webmail/syncdata.sh` sets on a
+Every account uses `password`, which is what `../webmail-legacy/syncdata.sh` sets on a
 synced database. If you have no local `webmail` database, `setup.sh` generates
 the same fixtures for 103mail.com too, with `maurits@vdschee.nl` as the login.
 
@@ -123,24 +109,23 @@ instead.
 ## Smoke test before opening the browser
 
 Four checks, in order, so a failure tells you which tier is wrong. Run them
-from `deploy/`.
+from `../webmail-deploy`.
 
-    # 1. nginx is up and TLS is trusted
-    curl --cacert certs/webmail-local-ca.crt https://webmail.example.com/health
+    # 1. nginx is up
+    curl http://localhost:8002/health
 
 Expect `{"status":"ok"}`. This is proxied to the API, so it also proves nginx
 can reach the API container and the API can answer.
 
     # 2. the client will know which Domain it is
-    curl --cacert certs/webmail-local-ca.crt https://webmail.example.com/config.json
+    curl http://localhost:8002/config.json
 
 Expect the Domain's branding as JSON. A `404` here is the failure behind the
 client's "This domain is not configured" screen. See
 [Troubleshooting](#troubleshooting).
 
     # 3. credentials work
-    curl --cacert certs/webmail-local-ca.crt \
-      -X POST https://webmail.example.com/api/v1/auth/token \
+    curl -X POST http://localhost:8002/api/v1/auth/token \
       -H 'Content-Type: application/json' \
       -d '{"email":"bob@example.com","password":"password"}'
 
@@ -148,8 +133,7 @@ Expect `{"name":"Session","value":"..."}`. Keep that value; the API sections
 below use it as `$TOK`.
 
     # 4. the federation descriptor is signed and served
-    curl --cacert certs/webmail-local-ca.crt \
-      https://webmail.example.com/.well-known/webmail-federation
+    curl http://localhost:8002/.well-known/webmail-federation
 
 Expect a JSON descriptor with the Domain's public key. It is rendered from the
 key the server signs with, so if this answers, the key file is readable and
@@ -160,7 +144,7 @@ problem.
 
 ## Manual test: mail
 
-Sign in at `https://webmail.example.com` as `bob@example.com` / `password`.
+Sign in at `http://localhost:8002` as `bob@example.com` / `password`.
 Mail is the section the client opens on.
 
 1. **The thread list loads.** The Inbox shows `Welcome to example.com`, with the
@@ -194,7 +178,7 @@ Mail is the section the client opens on.
 
 6. **Attachments.** Attach a file to a message and send it. Reopen the thread
    and download it back. Bytes are content-addressed by MD5 under
-   `deploy/data/example.com/attachments` in a four-level layout, so a second
+   `../webmail-deploy/data/example.com/attachments` in a four-level layout, so a second
    copy of the same file adds a row and no bytes:
 
        find data/example.com/attachments -type f | wc -l
@@ -257,8 +241,8 @@ the default view has content.
    through the API to be exercised in the UI:
 
        DAY=$(date -d tomorrow +%Y-%m-%d)
-       curl --cacert certs/webmail-local-ca.crt \
-         -X POST https://webmail.example.com/api/v1/calendar/meeting/1 \
+       curl \
+         -X POST http://localhost:8002/api/v1/calendar/meeting/1 \
          -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
          -d "{\"title\":\"Weekly\",\"startTime\":\"${DAY}T10:00:00\",
               \"endTime\":\"${DAY}T11:00:00\",\"attendees\":[],
@@ -269,8 +253,8 @@ the default view has content.
    confirm four occurrences appear on four consecutive weeks in the month view.
    The response carries every occurrence, so it can be checked without the UI:
 
-       curl --cacert certs/webmail-local-ca.crt -H "Authorization: Bearer $TOK" \
-         "https://webmail.example.com/api/v1/calendar/meeting/1?untilDate=$(date -d '+6 weeks' +%Y-%m-%d)"
+       curl -H "Authorization: Bearer $TOK" \
+         "http://localhost:8002/api/v1/calendar/meeting/1?untilDate=$(date -d '+6 weeks' +%Y-%m-%d)"
 
 ## Manual test: chat
 
@@ -282,7 +266,7 @@ Use two browsers, or one normal window and one private window. A second profile
 works; a second tab in the same profile does not, because it shares the session.
 
 1. **Sign both in.** `bob@example.com` in one and `carol@example.com` in the
-   other, both at `https://webmail.example.com`. Open Chat in each and select
+   other, both at `http://localhost:8002`. Open Chat in each and select
    the direct chat between them. Both should show the seeded message.
 
 2. **A message arrives without a reload.** Type in bob's window and send. It
@@ -319,14 +303,14 @@ works; a second tab in the same profile does not, because it shares the session.
 
 ### Checking chat without two browsers
 
-`deploy/chatcheck.py` drives both sides over real sockets and prints what each
-one saw. It signs both accounts in, mints a ClientId each, opens both sockets
+`../webmail-deploy/chatcheck.py` drives both sides over real sockets and
+prints what each one saw. It signs both accounts in, mints a ClientId each, opens both sockets
 and checks that a typing frame and a message frame cross:
 
-    cd deploy && python3 chatcheck.py
+    cd ../webmail-deploy && python3 chatcheck.py
 
-It resolves the hostname to the loopback address itself, so it runs whether or
-not `/etc/hosts` is set up. Needs `python3` with the `websockets` package.
+It talks to http://localhost:8002 the way the browser does. Needs `python3`
+with the `websockets` package.
 
 Expect four lines: both sides ready, the typing frame seen by the other, and the
 message seen by the other.
@@ -355,7 +339,7 @@ other exactly as it would on the internet.
 
    Status should reach delivered with `last_http_status` 200.
 
-3. Sign in on `https://webmail.103mail.com` as that Domain's login and confirm
+3. Sign in on `http://localhost:8001` as that Domain's login and confirm
    the thread arrived in the real mailbox. Reply, and confirm the reply comes
    back onto the same thread on the example.com side.
 
@@ -384,13 +368,13 @@ now, and the REST pair is what it replaced.
 An RSVP, for example, has to be set and read back over the API, because the
 calendar neither offers a control for it nor renders the answer:
 
-    curl --cacert certs/webmail-local-ca.crt \
-      -X PUT https://webmail.example.com/api/v1/calendar/meeting/2 \
+    curl \
+      -X PUT http://localhost:8002/api/v1/calendar/meeting/2 \
       -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
       -d '{"willAttend":"yes"}'
 
-    curl --cacert certs/webmail-local-ca.crt -H "Authorization: Bearer $TOK" \
-      https://webmail.example.com/api/v1/calendar/meeting/1 | grep -o '"willAttend":"[a-z]*"'
+    curl -H "Authorization: Bearer $TOK" \
+      http://localhost:8002/api/v1/calendar/meeting/1 | grep -o '"willAttend":"[a-z]*"'
 
 Expect `true` from the first and the new answer in the second. Testing this
 through the browser is not possible today.
@@ -422,9 +406,9 @@ or form-encoded body. Attachments are nested objects, so a request carrying them
 has to be JSON. On the generated fixtures every one of these ids is `1` for the
 first account, which makes a walkthrough easy:
 
-    curl --cacert certs/webmail-local-ca.crt \
+    curl \
       -H "Authorization: Bearer $TOK" \
-      https://webmail.example.com/api/v1/email/thread/1
+      http://localhost:8002/api/v1/email/thread/1
 
 The 103mail Domain is a dump of a real database, so its ids are whatever that
 database holds. Read them from `GET /email/mailbox/{customerId}` and work down.
@@ -442,7 +426,7 @@ The databases are files, so `down` on its own keeps everything you created. To
 reset one Domain only, delete its `data/{domain}/webmail.db` and run
 `./setup.sh`, which builds whatever database is missing.
 
-To change what the fixtures contain, edit `deploy/seed.sh` and reseed. Never
+To change what the fixtures contain, edit `../webmail-deploy/seed.sh` and reseed. Never
 edit `seed/example.com.sqlite.sql` directly. It is generated, and `--reseed`
 overwrites it.
 
@@ -487,10 +471,6 @@ from the API:
 **One browser stops receiving pushes.** Check `connections_denied` on that
 proxy. Two connections claiming the same ClientId is refused now, but a client
 that reuses one will lose its socket. A ClientId is single-use for connecting.
-
-**Certificate warnings in the browser.** The CA is not trusted, or it was
-regenerated. `setup.sh` keeps an existing CA precisely so this does not happen;
-if you deleted `certs/`, re-import the new `webmail-local-ca.crt`.
 
 **A peer refuses the certificate.** Correct behaviour. RFC 9.2 requires a Web
 PKI certificate, and these are signed by a local CA. Nothing to work around
