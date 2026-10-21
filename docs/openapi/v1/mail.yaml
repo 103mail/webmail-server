@@ -1,0 +1,112 @@
+openapi: 3.1.1
+info:
+  title: 103mail API - v1 - Mail
+  description: >-
+    The webhook received email arrives on (ADR 15). SES receipt rules write the
+    raw message to S3 and publish a notification to an SNS topic, and SNS posts
+    that notification here. There is no bearer token because the caller is
+    Amazon: the SNS message signature is the authentication, and nothing in the
+    body is acted on until it verifies.
+  termsOfService: https://www.103mail.com/terms
+  contact:
+    email: maurits@vdschee.nl
+  version: 1.0.0
+externalDocs:
+  description: Amazon SNS HTTP/S notification format
+  url: https://docs.aws.amazon.com/sns/latest/dg/sns-message-and-json-formats.html
+servers:
+  - url: https://www.103mail.com/api/v1/mail
+tags:
+  - name: Inbound
+security: []
+paths:
+  /inbound:
+    post:
+      tags:
+        - Inbound
+      summary: Receive an SNS notification about a received message
+      description: >-
+        A message that is dropped or ignored is still answered with 200, because
+        a 5xx is what makes SNS retry and there is nothing to retry. Subscription
+        and unsubscribe confirmations are completed here.
+      operationId: receiveInboundMail
+      requestBody:
+        required: true
+        description: >-
+          An SNS notification. SNS sends it as `text/plain`, so the content type
+          is not checked.
+        content:
+          text/plain:
+            schema:
+              $ref: "#/components/schemas/Notification"
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Notification"
+      responses:
+        "200":
+          description: Handled. The status says what happened to the message.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Outcome"
+        "400":
+          description: The body is not an SNS notification
+        "403":
+          description: The SNS signature does not verify
+        "413":
+          description: The body is larger than the configured limit
+        "500":
+          description: Processing failed and SNS should deliver the notification again
+        "503":
+          description: Inbound mail is not configured on this Server
+components:
+  schemas:
+    Notification:
+      type: object
+      description: The SNS message envelope. Only the fields used here are listed.
+      required:
+        - Type
+        - MessageId
+        - TopicArn
+        - Signature
+        - SignatureVersion
+        - SigningCertURL
+      properties:
+        Type:
+          type: string
+          enum:
+            - Notification
+            - SubscriptionConfirmation
+            - UnsubscribeConfirmation
+        MessageId:
+          type: string
+        TopicArn:
+          type: string
+        Message:
+          type: string
+          description: For a Notification, the SES receipt JSON pointing at the raw message in S3
+        Timestamp:
+          type: string
+          format: date-time
+        SignatureVersion:
+          type: string
+        Signature:
+          type: string
+        SigningCertURL:
+          type: string
+          format: uri
+        SubscribeURL:
+          type: string
+          format: uri
+          description: Present on a (un)subscribe confirmation
+        Token:
+          type: string
+    Outcome:
+      type: object
+      properties:
+        status:
+          type: string
+          description: >-
+            `accepted`, `confirmed`, or one of the `dropped:` and `ignored:`
+            reasons such as `dropped: spam` or `ignored: duplicate`
+          example: accepted

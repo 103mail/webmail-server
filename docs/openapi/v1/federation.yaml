@@ -1,0 +1,403 @@
+openapi: 3.1.1
+info:
+  title: 103mail API - v1 - Federation
+  description: >-
+    The Basic tier of the webmail federation protocol: discovery of a Domain's
+    peer descriptor and delivery of envelopes between Domains. The normative
+    text is `../webmail-federation/project_rfc.md`; section numbers below refer
+    to it. Neither endpoint takes a bearer token. The descriptor is public and
+    an inbound envelope is authenticated by its Ed25519 signature (ADR 17).
+  termsOfService: https://www.103mail.com/terms
+  contact:
+    email: maurits@vdschee.nl
+  version: 1.0.0
+externalDocs:
+  description: 103mail website
+  url: https://www.103mail.com/
+servers:
+  - url: https://webmail.103mail.com
+    description: >-
+      The Federation hostname of a Domain is `webmail.` prepended to the whole
+      DNS domain (RFC 4.1.1). The Host header selects which Domain answers.
+tags:
+  - name: Discovery
+  - name: Delivery
+security: []
+paths:
+  /.well-known/webmail-federation:
+    get:
+      tags:
+        - Discovery
+      summary: Get the peer descriptor of the Domain named by the Host header
+      description: RFC 4.1. Cached by peers for up to an hour.
+      operationId: getDescriptor
+      responses:
+        "200":
+          description: The peer descriptor
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=3600
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Descriptor"
+        "404":
+          description: >-
+            This Server does not federate (`not_federated`) or does not host the
+            Domain in the Host header (`unknown_domain`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    head:
+      tags:
+        - Discovery
+      summary: Check the peer descriptor without fetching it
+      operationId: headDescriptor
+      responses:
+        "200":
+          description: A descriptor exists for the Domain in the Host header
+        "404":
+          description: No descriptor exists for the Domain in the Host header
+  /api/v1/federation/inbound:
+    post:
+      tags:
+        - Delivery
+      summary: Deliver an envelope from a peer Domain
+      description: >-
+        RFC 6. The signature covers the four X-Federation and Date headers and
+        the body exactly as transmitted, joined as
+        `version \n sender \n nonce \n date \n body` (RFC 6.2). Nothing in the
+        body is trusted until it verifies. The `error` code of a failure tells
+        the peer whether to retry (RFC 6.3).
+      operationId: deliverEnvelope
+      parameters:
+        - in: header
+          name: X-Federation-Version
+          required: true
+          schema:
+            type: string
+            example: "0.2"
+          description: Protocol version the envelope is written in
+        - in: header
+          name: X-Federation-Sender
+          required: true
+          schema:
+            type: string
+            example: example.com
+          description: DNS domain of the sending Domain
+        - in: header
+          name: X-Federation-Nonce
+          required: true
+          schema:
+            type: string
+          description: Single-use value that makes a captured request unreplayable
+        - in: header
+          name: Date
+          required: true
+          schema:
+            type: string
+            example: Wed, 21 Oct 2026 10:00:00 GMT
+          description: Time of sending, which must fall inside the accepted window
+        - in: header
+          name: X-Federation-Signature
+          required: true
+          schema:
+            type: string
+            example: "ed25519:MEUCIQ..."
+          description: Base64 Ed25519 signature, prefixed with `ed25519:`
+      requestBody:
+        required: true
+        description: >-
+          The envelope. It must be `application/json; charset=utf-8`, carry no
+          Content-Encoding and stay under the advertised `max_envelope_bytes`.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Envelope"
+      responses:
+        "202":
+          description: Accepted, possibly with some recipients refused
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Accepted"
+        "400":
+          description: >-
+            Permanent: `malformed_envelope`, `schema_violation`,
+            `unsupported_version`, `attachment_mismatch` or `not_registrar`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: >-
+            `bad_signature`, `sender_mismatch`, `replay` or `stale_request`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: The sender is not a peer this Domain federates with (`peer_not_allowed`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No recipient is known here (`no_recipients`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: The envelope exceeds the advertised maximum (`too_large`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: Not JSON, or compressed (`unsupported_media_type`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "425":
+          description: >-
+            Transient: the sender is not (yet) a member of the thread
+            (`not_a_member`), for example while an invitation is in flight
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: "Transient: the peer sends too much (`rate_limited`)"
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait, also in `retry_after_seconds`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Transient (`server_error`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: This Server hosts no federated Domain (`not_federated` or `server_error`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  schemas:
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          example: bad_signature
+          description: Wire error code from RFC 6.3
+        detail:
+          type: string
+          description: Human-readable explanation
+        retry_after_seconds:
+          type: integer
+          description: Present on a 429, mirroring the Retry-After header
+    Descriptor:
+      type: object
+      description: RFC 4.2
+      properties:
+        domain:
+          type: string
+          example: 103mail.com
+        public_key:
+          type: string
+          example: "ed25519:2a5b..."
+          description: Current signing key, base64 with an `ed25519:` prefix
+        previous_public_keys:
+          type: array
+          maxItems: 4
+          items:
+            type: string
+          description: Keys retired less than 48 hours ago, still accepted for verification
+        versions:
+          type: array
+          items:
+            type: string
+          example: ["0.2"]
+        registrar:
+          type: boolean
+          example: false
+        max_envelope_bytes:
+          type: integer
+          format: int64
+          example: 10485760
+        max_attachment_bytes:
+          type: integer
+          format: int64
+          example: 26214400
+    Envelope:
+      type: object
+      description: RFC 5.3
+      required:
+        - version
+        - envelope_id
+        - origin_domain
+        - origin_sent_at
+        - thread
+        - message
+        - attachments
+        - recipients
+      properties:
+        version:
+          type: string
+          example: "0.2"
+        envelope_id:
+          type: string
+          format: uuid
+        origin_domain:
+          type: string
+          example: example.com
+        origin_sent_at:
+          type: string
+          format: date-time
+        thread:
+          $ref: "#/components/schemas/Thread"
+        message:
+          $ref: "#/components/schemas/Message"
+        attachments:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/Attachment"
+        recipients:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            format: email
+            maxLength: 320
+          description: The Destination's share of the thread members
+    Thread:
+      type: object
+      required:
+        - federation_id
+        - subject
+        - in_reply_to
+      properties:
+        federation_id:
+          type: string
+          format: uuid
+          description: Stable across Domains, so replies land on the right thread
+        subject:
+          type: string
+          maxLength: 998
+        in_reply_to:
+          type:
+            - string
+            - "null"
+          description: Federation id of the message this one answers
+        members:
+          type: array
+          maxItems: 1000
+          items:
+            type: string
+            format: email
+          description: Everyone on the thread, on every Domain
+        refused:
+          type: array
+          items:
+            type: string
+            format: email
+          description: Addresses the sender added that their own Domain refused (RFC 6.5)
+        left:
+          type: array
+          items:
+            type: string
+            format: email
+          description: Members on the sender's Domain who left the thread (RFC 5.6)
+    Message:
+      type: object
+      required:
+        - federation_id
+        - sender_email
+        - body
+        - sent_at
+      properties:
+        federation_id:
+          type: string
+          format: uuid
+        sender_email:
+          type: string
+          format: email
+          maxLength: 320
+          description: Must be on the sending Domain
+        sender_name:
+          type: string
+          maxLength: 255
+        body:
+          type: string
+          maxLength: 1048576
+        body_html:
+          type: string
+          maxLength: 4194304
+        sent_at:
+          type: string
+          format: date-time
+    Attachment:
+      type: object
+      description: RFC 7. The bytes travel inline, there is no second fetch.
+      required:
+        - federation_id
+        - file_name
+        - mime_type
+        - file_size
+        - hash_sha256_hex
+        - data
+      properties:
+        federation_id:
+          type: string
+          format: uuid
+        file_name:
+          type: string
+          maxLength: 255
+        mime_type:
+          type: string
+          maxLength: 255
+        file_size:
+          type: integer
+          format: int64
+        hash_sha256_hex:
+          type: string
+          pattern: "^[0-9a-fA-F]{64}$"
+        data:
+          type: string
+          contentEncoding: base64
+    Accepted:
+      type: object
+      properties:
+        envelope_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          example: accepted
+        refused_recipients:
+          type: array
+          items:
+            type: object
+            properties:
+              address:
+                type: string
+                format: email
+              error:
+                type: string
+                example: unknown_recipient

@@ -1,0 +1,897 @@
+openapi: 3.1.1
+info:
+  title: 103mail API - v1 - Chat
+  description: "API end-points for chat clients."
+  termsOfService: https://www.103mail.com/terms
+  contact:
+    email: maurits@vdschee.nl
+  version: 1.0.0
+externalDocs:
+  description: 103mail website
+  url: https://www.103mail.com/
+servers:
+  - url: https://www.103mail.com/api/v1/chat
+tags:
+  - name: Chat
+  - name: Participant
+  - name: Message
+  - name: Attachment
+  - name: Presence
+  - name: Typing
+  - name: Session
+security:
+  - bearerAuth: []
+paths:
+  /session:
+    post:
+      tags:
+        - Session
+      summary: Get a ClientId to open the chat WebSocket with
+      description: >-
+        Creating a session is the one authenticated step of opening a socket.
+        The returned ClientId is single use and short lived; the client connects
+        to the WebSocket with it and everything after that is addressed by the
+        ClientId alone (ADR 13, ADR 18).
+      operationId: createSession
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          description: Access token is missing or invalid
+  /chat/{id}:
+    get:
+      tags:
+        - Chat
+      summary: List the chats of the specified mailbox
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the mailbox to operate on
+        - in: query
+          name: search
+          schema:
+            type: string
+          required: false
+          description: Search term to apply to chat list
+      operationId: listChats
+      responses:
+        "200":
+          description: Chats of the specified mailbox
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Chat"
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+    post:
+      tags:
+        - Chat
+      summary: Create a chat in the specified mailbox
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the mailbox to operate on
+      operationId: createChat
+      requestBody:
+        description: Request to create a chat
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [direct, group]
+                  example: "direct"
+                  description: Type of chat to create (direct or group)
+                name:
+                  type: string
+                  example: "Project Team"
+                  description: Name of the chat (required for group chats)
+                participants:
+                  type: array
+                  items:
+                    type: string
+                    format: email
+                    example: "joost@103mail.com"
+                  description: Email addresses of participants (exactly 1 for direct chats, 1+ for group chats)
+              required:
+                - type
+                - participants
+      responses:
+        "200":
+          description: Operation succeeded, chatId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid chat data
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+    put:
+      tags:
+        - Chat
+      summary: Edit the specified chat
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the chat to operate on
+      operationId: editChat
+      requestBody:
+        description: Request to edit a chat's settings
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: "Updated Team Name"
+                  description: New name for the chat (group chats only)
+                muted:
+                  type: boolean
+                  example: true
+                  description: Whether the chat is muted
+                notificationPreference:
+                  type: string
+                  enum: [all, mentions_only, none]
+                  example: "mentions_only"
+                  description: Notification preference for the chat
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "400":
+          description: Invalid chat settings
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+    delete:
+      tags:
+        - Chat
+      summary: Delete the specified chat
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the chat to operate on
+      operationId: deleteChat
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+  /participant/{id}:
+    get:
+      tags:
+        - Participant
+      summary: List the participants of the specified chat
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the chat to operate on
+      operationId: listParticipants
+      responses:
+        "200":
+          description: Participants of the specified chat
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Participant"
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+    post:
+      tags:
+        - Participant
+      summary: Add a participant to the specified chat
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the chat to operate on
+      operationId: addParticipant
+      requestBody:
+        description: Request to add a participant to a chat
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "joost@103mail.com"
+                  description: Email address of the participant to add
+                role:
+                  type: string
+                  enum: [admin, member]
+                  example: "member"
+                  description: Role of the participant
+              required:
+                - email
+      responses:
+        "200":
+          description: Operation succeeded, participantId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid participant data
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+    delete:
+      tags:
+        - Participant
+      summary: Remove the specified participant from the chat
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the participant to operate on
+      operationId: removeParticipant
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+  /message/{id}:
+    get:
+      tags:
+        - Message
+      summary: List the messages of the specified chat
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the chat to operate on
+        - in: query
+          name: search
+          schema:
+            type: string
+          required: false
+          description: Search term to apply to message list
+      operationId: listMessages
+      responses:
+        "200":
+          description: Messages of the specified chat
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatMessage"
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+    post:
+      tags:
+        - Message
+      summary: Send a message in the specified chat
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the chat to operate on
+      operationId: sendMessage
+      requestBody:
+        description: Request to send a message in a chat
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                body:
+                  type: string
+                  example: "Hello everyone!"
+                  description: Plain text body of the message
+                bodyHtml:
+                  type: string
+                  example: "<p>Hello <strong>everyone</strong>!</p>"
+                  description: HTML body of the message (optional)
+                attachments:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      fileName:
+                        type: string
+                        example: "document.pdf"
+                      mimeType:
+                        type: string
+                        example: "application/pdf"
+                      fileData:
+                        type: string
+                        format: byte
+                        description: Base64-encoded file data
+                    required:
+                      - fileName
+                      - mimeType
+                      - fileData
+                  description: Optional attachments (max 25MB each)
+              required:
+                - body
+      responses:
+        "200":
+          description: Operation succeeded, messageId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid message data
+        "401":
+          description: Access token is missing or invalid
+        "413":
+          description: Attachment too large (max 25MB)
+        "501":
+          description: Not yet implemented
+    put:
+      tags:
+        - Message
+      summary: Edit the specified message (within 15 minutes)
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the message to operate on
+      operationId: editMessage
+      requestBody:
+        description: Request to edit a message
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                body:
+                  type: string
+                  example: "Updated message text"
+                  description: New plain text body of the message
+                bodyHtml:
+                  type: string
+                  example: "<p>Updated <strong>message</strong> text</p>"
+                  description: New HTML body of the message (optional)
+              required:
+                - body
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "400":
+          description: Invalid message data or edit window expired
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+    delete:
+      tags:
+        - Message
+      summary: Delete the specified message (within 15 minutes)
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the message to operate on
+      operationId: deleteMessage
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "400":
+          description: Delete window expired
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+  /attachment/{attachmentId}:
+    get:
+      tags:
+        - Attachment
+      summary: Get the specified attachment
+      parameters:
+        - in: path
+          name: attachmentId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the attachment to operate on
+      operationId: getAttachment
+      responses:
+        "200":
+          description: Attachment data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Attachment"
+        "404":
+          description: Attachment not found
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+  /presence/{id}:
+    get:
+      tags:
+        - Presence
+      summary: Get presence status for the specified user(s)
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Comma-separated list of numeric user identifiers
+      operationId: getPresence
+      responses:
+        "200":
+          description: Presence status for specified users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Presence"
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+    put:
+      tags:
+        - Presence
+      summary: Update presence status for the current user
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the user (must be current user)
+      operationId: updatePresence
+      requestBody:
+        description: Request to update presence status
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [online, offline, away]
+                  example: "online"
+                  description: New presence status
+              required:
+                - status
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "400":
+          description: Invalid status value
+        "401":
+          description: Access token is missing or invalid
+        "403":
+          description: Can only update own presence status
+        "501":
+          description: Not yet implemented
+  /typing/{chatId}:
+    get:
+      tags:
+        - Typing
+      summary: Get current typing indicators for the specified chat
+      parameters:
+        - in: path
+          name: chatId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the chat to operate on
+      operationId: getTypingIndicators
+      responses:
+        "200":
+          description: Active typing indicators for the chat
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TypingIndicator"
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+    post:
+      tags:
+        - Typing
+      summary: Start or update typing indicator for the specified chat
+      parameters:
+        - in: path
+          name: chatId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the chat to operate on
+      operationId: startTyping
+      responses:
+        "200":
+          description: Operation succeeded (indicator expires after 3 seconds)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+    delete:
+      tags:
+        - Typing
+      summary: Clear typing indicator for the specified chat
+      parameters:
+        - in: path
+          name: chatId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the chat to operate on
+      operationId: stopTyping
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+        "501":
+          description: Not yet implemented
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Session:
+      type: object
+      properties:
+        clientId:
+          type: string
+          example: "Qm9vZ2llV29vZ2llQm9vZ2llV29v"
+          description: Opaque identifier to connect the WebSocket with
+        expiresAt:
+          type: string
+          format: date-time
+          example: "2026-10-21T12:00:00Z"
+          description: Moment after which the ClientId can no longer be claimed
+    Success:
+      type: boolean
+      example: true
+      description: True or false
+    Identifier:
+      type: integer
+      format: int64
+      example: 1
+      description: Unique identifier for the object
+    Chat:
+      type: object
+      properties:
+        chatId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the chat
+        type:
+          type: string
+          enum: [direct, group]
+          example: "direct"
+          description: Type of chat
+        name:
+          type: [string, "null"]
+          example: "Project Team"
+          description: Name of the chat (null for direct chats)
+        unreadCount:
+          type: integer
+          format: int32
+          example: 2
+          description: Number of unread messages in the chat
+        muted:
+          type: boolean
+          example: false
+          description: Whether the chat is muted
+        notificationPreference:
+          type: string
+          enum: [all, mentions_only, none]
+          example: "all"
+          description: Notification preference for the chat
+        participants:
+          type: array
+          items:
+            type: object
+            properties:
+              email:
+                type: string
+                format: email
+                example: "joost@103mail.com"
+              name:
+                type: string
+                example: "Joost van der Schee"
+              role:
+                type: string
+                enum: [creator, admin, member]
+                example: "member"
+          description: List of chat participants
+        createdAt:
+          type: string
+          format: date-time
+          example: "2025-11-01T10:00:00Z"
+          description: Date and time the chat was created
+    Participant:
+      type: object
+      properties:
+        participantId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the participant
+        email:
+          type: string
+          format: email
+          example: "mevdschee@103mail.com"
+          description: Email address of the participant
+        name:
+          type: string
+          example: "Maurits van der Schee"
+          description: Display name of the participant
+        role:
+          type: string
+          enum: [creator, admin, member]
+          example: "creator"
+          description: Role of the participant in the chat
+        status:
+          type: string
+          enum: [online, offline, away]
+          example: "online"
+          description: Current presence status of the participant
+        joinedAt:
+          type: string
+          format: date-time
+          example: "2025-11-01T10:00:00Z"
+          description: Date and time the participant joined
+        leftAt:
+          type: [string, "null"]
+          format: date-time
+          example: null
+          description: Date and time the participant left (null if active)
+    ChatMessage:
+      type: object
+      properties:
+        messageId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the message
+        senderEmail:
+          type: string
+          format: email
+          example: "mevdschee@103mail.com"
+          description: Email address of the message sender
+        senderName:
+          type: string
+          example: "Maurits van der Schee"
+          description: Display name of the message sender
+        body:
+          type: string
+          example: "Hello Joost!"
+          description: Plain text body of the message
+        bodyHtml:
+          type: string
+          example: "<p>Hello Joost!</p>"
+          description: HTML body of the message
+        createdAt:
+          type: string
+          format: date-time
+          example: "2025-11-01T10:05:00Z"
+          description: Date and time the message was created
+        editedAt:
+          type: [string, "null"]
+          format: date-time
+          example: null
+          description: Date and time the message was last edited
+        deletedAt:
+          type: [string, "null"]
+          format: date-time
+          example: null
+          description: Date and time the message was deleted
+        deliveredAt:
+          type: [string, "null"]
+          format: date-time
+          example: "2025-11-01T10:05:01Z"
+          description: Date and time the message was delivered
+        readAt:
+          type: [string, "null"]
+          format: date-time
+          example: "2025-11-01T10:05:30Z"
+          description: Date and time the message was read
+        attachments:
+          type: array
+          items:
+            type: object
+            properties:
+              attachmentId:
+                type: integer
+                format: int64
+              fileName:
+                type: string
+              mimeType:
+                type: string
+              fileSize:
+                type: integer
+                format: int64
+          description: List of message attachments
+        deliveryStatus:
+          type: [object, "null"]
+          properties:
+            sent:
+              type: integer
+              format: int32
+              description: Number of participants message was sent to
+            delivered:
+              type: integer
+              format: int32
+              description: Number of participants message was delivered to
+            read:
+              type: integer
+              format: int32
+              description: Number of participants who read the message
+          description: Delivery status information
+    Attachment:
+      type: object
+      properties:
+        fileName:
+          type: string
+          example: "document.pdf"
+          description: Name of the file
+        mimeType:
+          type: string
+          example: "application/pdf"
+          description: MIME type of the file
+        fileSize:
+          type: integer
+          format: int64
+          example: 1024
+          description: Size of the file in bytes
+        fileData:
+          type: string
+          format: byte
+          description: Base64-encoded file data
+    Presence:
+      type: object
+      properties:
+        userId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the user
+        status:
+          type: string
+          enum: [online, offline, away]
+          example: "online"
+          description: Current presence status
+        lastActivityAt:
+          type: string
+          format: date-time
+          example: "2025-11-01T10:30:00Z"
+          description: Date and time of last activity
+    TypingIndicator:
+      type: object
+      properties:
+        userId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the user who is typing
+        userName:
+          type: string
+          example: "Maurits van der Schee"
+          description: Display name of the user who is typing
+        startedAt:
+          type: string
+          format: date-time
+          example: "2025-11-01T10:30:00Z"
+          description: Date and time when typing started
+        expiresAt:
+          type: string
+          format: date-time
+          example: "2025-11-01T10:30:03Z"
+          description: Date and time when the indicator expires

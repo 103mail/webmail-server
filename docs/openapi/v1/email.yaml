@@ -1,0 +1,1108 @@
+openapi: 3.1.1
+info:
+  title: 103mail API - v1 - Email
+  description: "API end-points for email clients."
+  termsOfService: https://www.103mail.com/terms
+  contact:
+    email: maurits@vdschee.nl
+  version: 1.0.0
+externalDocs:
+  description: 103mail website
+  url: https://www.103mail.com/
+servers:
+  - url: https://www.103mail.com/api/v1/email
+tags:
+  - name: Mailbox
+  - name: Folder
+  - name: Thread
+  - name: Subscriber
+  - name: Message
+  - name: Attachment
+  - name: Contact
+security:
+  - bearerAuth: []
+paths:
+  /mailbox/{id}:
+    get:
+      tags:
+        - Mailbox
+      summary: List the mailboxes of the specified customer
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the customer to operate on
+        - in: query
+          name: search
+          schema:
+            type: string
+          required: false
+          description: Search term to apply to mailbox list
+      operationId: listMailboxes
+      responses:
+        "200":
+          description: Mailboxes of the specified customer
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Mailbox"
+        "401":
+          description: Access token is missing or invalid
+    post:
+      tags:
+        - Mailbox
+      summary: Create a mailbox in the specified customer
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the customer to operate on
+      operationId: createMailbox
+      requestBody:
+        description: Request to add a mailbox to an acount
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: "mevdschee"
+                  description: Display name for the mailbox that is added to the account
+                senderEmail:
+                  type: string
+                  format: email
+                  example: "mevdschee@103mail.com"
+                  description: Sender email address for the mailbox that is added to the account
+                senderName:
+                  type: string
+                  format: full-name
+                  example: "Maurits van der Schee"
+                  description: Sender name for the mailbox that is added to the account
+              required:
+                - name
+      responses:
+        "200":
+          description: Operation succeeded, mailboxId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "401":
+          description: Access token is missing or invalid
+    put:
+      tags:
+        - Mailbox
+      summary: Edit the specified mailbox
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the mailbox to operate on
+      operationId: editMailbox
+      requestBody:
+        description: Request to edit a mailbox in the account
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: "mevdschee"
+                  description: New display name for the mailbox
+                color:
+                  type: string
+                  example: "blue"
+                  description: New color for the mailbox
+                isDefault:
+                  type: boolean
+                  example: true
+                  description: True if you want to set this as the default mailbox
+                isShared:
+                  type: boolean
+                  example: true
+                  description: True if this is a shared mailbox
+                senderEmail:
+                  type: string
+                  format: email
+                  example: "mevdschee@103mail.com"
+                  description: New sender email address for the mailbox
+                senderName:
+                  type: string
+                  format: full-name
+                  example: "Maurits van der Schee"
+                  description: New sender name for the mailbox
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+    delete:
+      tags:
+        - Mailbox
+      summary: Delete the specified mailbox
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the mailbox to operate on
+      operationId: deleteMailbox
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+  /folder/{id}:
+    get:
+      tags:
+        - Folder
+      summary: List the folders of the specified mailbox
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the mailbox to operate on
+        - in: query
+          name: search
+          schema:
+            type: string
+          required: false
+          description: Search term to apply to folder list
+      operationId: listFolders
+      responses:
+        "200":
+          description: Folders of the specified mailbox
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Folder"
+        "401":
+          description: Access token is missing or invalid
+    post:
+      tags:
+        - Folder
+      summary: Create a folder in the specified mailbox
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the mailbox to operate on
+      operationId: createFolder
+      requestBody:
+        description: Request to create a folder in the mailbox of an account
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: "Work"
+                  description: Name of the folder to create in the mailbox of the account
+              required:
+                - name
+      responses:
+        "200":
+          description: Operation succeeded, folderId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid folder name
+        "401":
+          description: Access token is missing or invalid
+    put:
+      tags:
+        - Folder
+      summary: Edit the specified folder
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the folder to operate on
+      operationId: editFolder
+      requestBody:
+        description: Request to edit a folder in the mailbox of an account
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: "Work"
+                  description: New name of the folder
+                isDefault:
+                  type: boolean
+                  example: true
+                  description: True if you want to set this as the default folder
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+    delete:
+      tags:
+        - Folder
+      summary: Delete the specified folder
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the folder to operate on
+      operationId: deleteFolder
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+  /thread/{id}:
+    get:
+      tags:
+        - Thread
+      summary: List the threads of the specified folder
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the folder to operate on
+        - in: query
+          name: search
+          schema:
+            type: string
+          required: false
+          description: Search term to apply to thread list
+      operationId: listThreads
+      responses:
+        "200":
+          description: Threads of the specified folder
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Thread"
+        "401":
+          description: Access token is missing or invalid
+    post:
+      tags:
+        - Thread
+      summary: Create a thread in the specified folder
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the folder to operate on
+      operationId: createThread
+      requestBody:
+        description: Request to add a thread to a mailbox of an account
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                subscribers:
+                  type: array
+                  items:
+                    type: string
+                    format: email
+                    example: "jhvanderschee@103mail.com"
+                    description: Email address of the subscribers to the thread
+                subject:
+                  type: string
+                  example: "Hello World"
+                  description: Subject of the thread to add to the mailbox of the account
+                body:
+                  type: string
+                  example: "Hello Maurits, I am mailing you because it is your birthday. Happy birthday! Kind regards, Joost"
+                  description: Body of the first message of the thread to add to the mailbox of the account
+              required:
+                - subscribers
+                - subject
+                - body
+          application/json:
+            schema:
+              type: object
+              properties:
+                subscribers:
+                  type: array
+                  items:
+                    type: string
+                    format: email
+                    example: "jhvanderschee@103mail.com"
+                    description: Email address of the subscribers to the thread
+                subject:
+                  type: string
+                  example: "Hello World"
+                  description: Subject of the thread to add to the mailbox of the account
+                body:
+                  type: string
+                  example: "Hello Maurits, I am mailing you because it is your birthday. Happy birthday! Kind regards, Joost"
+                  description: Body of the first message of the thread to add to the mailbox of the account
+                attachments:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/NewAttachment"
+                  description: Files to attach to the first message of the thread
+              required:
+                - subscribers
+                - subject
+                - body
+      responses:
+        "200":
+          description: Operation succeeded, threadId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid thread subject
+        "401":
+          description: Access token is missing or invalid
+    put:
+      tags:
+        - Thread
+      summary: Move the specified thread to another folder
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the thread to operate on
+      operationId: editThread
+      requestBody:
+        description: Request to move a thread to another folder of the account
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                folderId:
+                  type: integer
+                  format: int64
+                  example: 3
+                  description: Folder to move the thread to. Omitted or 0 leaves the thread where it is.
+      responses:
+        "200":
+          description: Operation succeeded, false when the thread or folder does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "400":
+          description: Invalid thread identifier
+        "401":
+          description: Access token is missing or invalid
+    delete:
+      tags:
+        - Thread
+      summary: Delete the specified thread
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the thread to operate on
+      operationId: deleteThread
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+  /subscriber/{threadId}:
+    post:
+      tags:
+        - Subscriber
+      summary: Add a subscriber to the specified thread
+      parameters:
+        - in: path
+          name: threadId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the thread to operate on
+      operationId: addSubscriber
+      requestBody:
+        description: Request to add a subscriber to a thread in the mailbox of an account
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "joost@103mail.com"
+                  description: Email address of the subscriber to add to the thread in the mailbox of the account
+      responses:
+        "200":
+          description: Operation succeeded, messageId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid subscriber email address
+        "401":
+          description: Access token is missing or invalid
+    delete:
+      tags:
+        - Subscriber
+      summary: Leave the specified thread
+      description: >-
+        Removes the caller's own address from the thread. Only an address of the
+        logged in account can leave; nobody can remove someone else (federation
+        RFC 5.6). The email is passed in the query string, as for every DELETE.
+      parameters:
+        - in: path
+          name: threadId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the thread to operate on
+        - in: query
+          name: email
+          schema:
+            type: string
+            format: email
+          required: true
+          description: Address of the logged in account that leaves the thread
+      operationId: leaveThread
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "400":
+          description: Invalid thread identifier or missing email address
+        "401":
+          description: Access token is missing or invalid
+        "403":
+          description: >-
+            The address is not one of the account's (`only_yourself`) or is not
+            a member of the thread (`not_a_member`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /message/{id}:
+    get:
+      tags:
+        - Message
+      summary: List the messages of the specified thread
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the thread to operate on
+        - in: query
+          name: search
+          schema:
+            type: string
+          required: false
+          description: Search term to apply to message list
+      operationId: listMessages
+      responses:
+        "200":
+          description: Messages of the specified thread
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+        "401":
+          description: Access token is missing or invalid
+    post:
+      tags:
+        - Message
+      summary: Create a message in the specified thread
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the thread to operate on
+      operationId: createMessage
+      requestBody:
+        description: Request to add a message to a thread in the mailbox of an account
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                body:
+                  type: string
+                  example: "Hello Maurits, I am mailing you because it is your birthday. Happy birthday! Kind regards, Joost"
+                  description: Body of the message to add to the thread in the mailbox of the account
+              required:
+                - body
+          application/json:
+            schema:
+              type: object
+              properties:
+                body:
+                  type: string
+                  example: "Hello Maurits, I am mailing you because it is your birthday. Happy birthday! Kind regards, Joost"
+                  description: Body of the message to add to the thread in the mailbox of the account
+                attachments:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/NewAttachment"
+                  description: Files to attach to the message
+              required:
+                - body
+      responses:
+        "200":
+          description: Operation succeeded, messageId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid message body
+        "401":
+          description: Access token is missing or invalid
+    put:
+      tags:
+        - Message
+      summary: Mark the specified message as read
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the message to operate on
+      operationId: editMessage
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+  /attachment/{attachmentId}:
+    get:
+      tags:
+        - Attachment
+      summary: Get the specified attachment
+      parameters:
+        - in: path
+          name: attachmentId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the attachment to operate on
+      operationId: getAttachment
+      responses:
+        "200":
+          description: Attachment metadata and contents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Attachment"
+        "400":
+          description: Invalid attachment identifier
+        "401":
+          description: Access token is missing or invalid
+        "404":
+          description: Attachment not found
+    delete:
+      tags:
+        - Attachment
+      summary: Delete the specified attachment
+      parameters:
+        - in: path
+          name: attachmentId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the attachment to operate on
+      operationId: deleteAttachment
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "400":
+          description: Invalid attachment identifier
+        "401":
+          description: Access token is missing or invalid
+        "404":
+          description: Attachment not found
+  /contact/{id}:
+    get:
+      tags:
+        - Contact
+      summary: List the contacts of the specified customer
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the customer to operate on
+        - in: query
+          name: search
+          schema:
+            type: string
+          required: false
+          description: Search term to apply to contact list
+      operationId: listContacts
+      responses:
+        "200":
+          description: Contacts of the specified customer
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Contact"
+        "401":
+          description: Access token is missing or invalid
+    post:
+      tags:
+        - Contact
+      summary: Create a contact in the specified customer
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the customer to operate on
+      operationId: createContact
+      requestBody:
+        description: Request to add a contact to an account
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  example: jhvanderschee@103mail.com
+                  description: New email address of the contact
+                name:
+                  type: string
+                  example: "Joost van der Schee"
+                  description: New name of the contact
+              required:
+                - email
+      responses:
+        "200":
+          description: Operation succeeded, contactId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid email address
+        "401":
+          description: Access token is missing or invalid
+    put:
+      tags:
+        - Contact
+      summary: Edit the specified contact
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the contact to operate on
+      operationId: editContact
+      requestBody:
+        description: Request to edit a contact of an account
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  example: jhvanderschee@103mail.com
+                  description: New email address of the contact
+                name:
+                  type: string
+                  example: "Joost van der Schee"
+                  description: New name of the contact
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+    delete:
+      tags:
+        - Contact
+      summary: Delete the specified contact
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the contact to operate on
+      operationId: deleteContact
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: not_a_member
+          description: Machine-readable error code
+        detail:
+          type: string
+          description: Human-readable explanation
+    Success:
+      type: boolean
+      example: true
+      description: True or false
+    Identifier:
+      type: integer
+      format: int64
+      example: 1
+      description: Unique identifier for the object
+    Mailbox:
+      type: object
+      properties:
+        mailboxId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the mailbox
+        name:
+          type: string
+          example: "mevdschee@103mail.com"
+          description: Display name for the mailbox
+        color:
+          type: string
+          example: "blue"
+          description: Color label for the mailbox
+        unreadCount:
+          type: integer
+          format: int32
+          example: 2
+          description: Number of unread messages in the mailbox
+        isDefault:
+          type: boolean
+          example: true
+          description: True if this is the default mailbox
+        isShared:
+          type: boolean
+          example: true
+          description: True if this is a shared mailbox
+        senderEmail:
+          type: string
+          format: email
+          example: "mevdschee@103mail.com"
+          description: Email address of the sender
+        senderName:
+          type: string
+          format: full-name
+          example: "Maurits van der Schee"
+          description: Display name of the sender
+    Folder:
+      type: object
+      properties:
+        folderId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the folder
+        name:
+          type: string
+          example: "Inbox"
+          description: Display name for the folder
+        unreadCount:
+          type: integer
+          format: int32
+          example: 2
+          description: Number of unread messages in the folder
+        isDefault:
+          type: boolean
+          example: true
+          description: True if this is the default folder
+    Thread:
+      type: object
+      properties:
+        threadId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the thread
+        subject:
+          type: string
+          example: "Hello World"
+          description: Subject of the thread
+        summary:
+          type: string
+          example: "Dear Maurits, I am mailing you because it is your birthday..."
+          description: Summary of the thread
+        unreadCount:
+          type: integer
+          format: int32
+          example: 2
+          description: Number of unread messages in the thread
+        subscribers:
+          type: array
+          items:
+            type: object
+            properties:
+              email:
+                type: string
+                format: email
+                example: joost@103mail.com
+                description: Email address of the subscriber
+              name:
+                type: string
+                format: full-name
+                example: "Joost van der Schee"
+                description: Display name of the subscriber
+        attachmentCount:
+          type: integer
+          format: int32
+          example: 1
+          description: Number of attachments in the thread
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2025-05-13T23:14:56Z"
+          description: Date and time of the last update
+    Message:
+      type: object
+      properties:
+        messageId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the message
+        senderEmail:
+          type: string
+          format: email
+          example: mevdschee@103mail.com
+          description: Email address of the sender
+        senderName:
+          type: string
+          format: full-name
+          example: "Maurits van der Schee"
+          description: Display name of the sender
+        recipients:
+          type: array
+          items:
+            type: object
+            properties:
+              email:
+                type: string
+                format: email
+                example: joost@103mail.com
+                description: Email address of the recipient
+              name:
+                type: string
+                format: full-name
+                example: "Joost van der Schee"
+                description: Display name of the recipient
+        body:
+          type: string
+          example: "Hello Maurits, I am mailing you because it is your birthday. Happy birthday! Kind regards, Joost"
+          description: Body of the message
+        sentAt:
+          type: string
+          format: date-time
+          example: "2025-05-13T23:14:56Z"
+          description: Date and time the message was sent
+        readAt:
+          type: [string, "null"]
+          format: date-time
+          example: null
+          description: Date and time the message was read
+        attachments:
+          type: array
+          items:
+            type: object
+            properties:
+              attachmentId:
+                type: integer
+                format: int64
+                example: 1
+                description: Unique identifier for the attachment
+              fileName:
+                type: string
+                example: "document.pdf"
+                description: Name of the file
+              mimeType:
+                type: string
+                example: "application/pdf"
+                description: MIME type of the file
+              fileSize:
+                type: integer
+                format: int64
+                example: 1024
+                description: Size of the file in bytes
+          description: Attachments of the message, without their contents
+    Attachment:
+      type: object
+      properties:
+        fileName:
+          type: string
+          example: "document.pdf"
+          description: Name of the file
+        mimeType:
+          type: string
+          example: "application/pdf"
+          description: MIME type of the file
+        fileSize:
+          type: integer
+          format: int64
+          example: 1024
+          description: Size of the file in bytes
+        fileData:
+          type: string
+          format: byte
+          description: Base64 encoded contents of the file
+    NewAttachment:
+      type: object
+      properties:
+        fileName:
+          type: string
+          example: "document.pdf"
+          description: Name of the file
+        mimeType:
+          type: string
+          example: "application/pdf"
+          description: MIME type of the file
+        fileData:
+          type: string
+          format: byte
+          description: Base64 encoded contents of the file
+      required:
+        - fileName
+        - mimeType
+    Contact:
+      type: object
+      properties:
+        contactId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the contact
+        email:
+          type: string
+          format: email
+          example: joost@103mail.com
+          description: Email address of the contact
+        name:
+          type: string
+          format: full-name
+          example: "Joost van der Schee"
+          description: Display name of the contact

@@ -1,0 +1,473 @@
+openapi: 3.1.1
+info:
+  title: 103mail API - v1 - Calendar
+  description: "API end-points for calendar clients."
+  termsOfService: https://www.103mail.com/terms
+  contact:
+    email: maurits@vdschee.nl
+  version: 1.0.0
+externalDocs:
+  description: 103mail website
+  url: https://www.103mail.com/
+servers:
+  - url: https://www.103mail.com/api/v1/calendar
+tags:
+  - name: Calendar
+  - name: Meeting
+  - name: Attendee
+  - name: Document
+security:
+  - bearerAuth: []
+paths:
+  /calendar/{customerId}:
+    get:
+      tags:
+        - Calendar
+      summary: List the calendars of the specified customer
+      parameters:
+        - in: path
+          name: customerId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the customer to operate on
+      operationId: listCalendars
+      responses:
+        "200":
+          description: Calendars of the specified customer
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Calendar"
+        "401":
+          description: Access token is missing or invalid
+  /meeting/{id}:
+    get:
+      tags:
+        - Meeting
+      summary: List the meetings of the specified calendars
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Comma-separated list of numeric identifiers of the calendars to operate on
+        - in: query
+          name: fromDate
+          schema:
+            type: string
+            format: date
+          required: false
+          description: Start date for the meeting list (YYYY-MM-DD)
+        - in: query
+          name: untilDate
+          schema:
+            type: string
+            format: date
+          required: false
+          description: End date for the meeting list (YYYY-MM-DD)
+      operationId: listMeetings
+      responses:
+        "200":
+          description: Meetings of the specified calendars grouped by day
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Meeting"
+        "401":
+          description: Access token is missing or invalid
+    post:
+      tags:
+        - Meeting
+      summary: Create a meeting in the specified calendar
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: string
+          required: true
+          description: Comma-separated list of numeric identifiers of the calendars (only the first will be used)
+      operationId: createMeeting
+      requestBody:
+        description: Request to add a meeting to a calendar
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  example: "Securities Regulation"
+                  description: Title of the meeting
+                startTime:
+                  type: string
+                  format: date-time
+                  example: "2025-10-29 14:00:00"
+                  description: Start time of the meeting
+                endTime:
+                  type: string
+                  format: date-time
+                  example: "2025-10-29 15:00:00"
+                  description: End time of the meeting
+                timeZone:
+                  type: string
+                  example: "Europe/Amsterdam"
+                  description: Time zone of the meeting
+                attendees:
+                  type: array
+                  items:
+                    type: string
+                    format: email
+                    example: "jhvanderschee@103mail.com"
+                  description: List of attendee email addresses
+                repeatRule:
+                  type: string
+                  example: ""
+                  description: Repeat rule for recurring meetings
+                descriptionHtml:
+                  type: string
+                  example: "Meeting about Securities Regulation"
+                  description: HTML description of the meeting
+              required:
+                - title
+                - startTime
+                - endTime
+                - attendees
+      responses:
+        "200":
+          description: Operation succeeded, meetingId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid meeting data
+        "401":
+          description: Access token is missing or invalid
+    put:
+      tags:
+        - Meeting
+      summary: Edit the specified meeting
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the meeting to operate on
+      operationId: editMeeting
+      requestBody:
+        description: Request to edit a meeting's attendance status
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                willAttend:
+                  type: [string, "null"]
+                  enum: ["yes", "no", "maybe", null]
+                  example: "yes"
+                  description: Attendance status for the meeting
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "400":
+          description: Invalid willAttend value
+        "401":
+          description: Access token is missing or invalid
+    delete:
+      tags:
+        - Meeting
+      summary: Delete the specified meeting
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the meeting to operate on
+      operationId: deleteMeeting
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+  /attendee/{meetingId}:
+    post:
+      tags:
+        - Attendee
+      summary: Add an attendee to the specified meeting
+      parameters:
+        - in: path
+          name: meetingId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the meeting to operate on
+      operationId: addAttendee
+      requestBody:
+        description: Request to add an attendee to a meeting
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "joost@103mail.com"
+                  description: Email address of the attendee to add to the meeting
+              required:
+                - email
+      responses:
+        "200":
+          description: Operation succeeded, attendeeId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid attendee email address
+        "401":
+          description: Access token is missing or invalid
+  /document/{id}:
+    post:
+      tags:
+        - Document
+      summary: Add a document to the specified meeting
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the meeting to operate on
+      operationId: addDocument
+      requestBody:
+        description: Request to add a document to a meeting
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                fileName:
+                  type: string
+                  example: "presentation.pdf"
+                  description: Name of the file to attach to the meeting
+                mimeType:
+                  type: string
+                  example: "application/pdf"
+                  description: MIME type of the file
+                fileData:
+                  type: string
+                  format: byte
+                  description: Base64-encoded file data
+              required:
+                - fileName
+                - mimeType
+                - fileData
+      responses:
+        "200":
+          description: Operation succeeded, documentId is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Identifier"
+        "400":
+          description: Invalid document data
+        "401":
+          description: Access token is missing or invalid
+    get:
+      tags:
+        - Document
+      summary: Get the specified document
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the document to operate on
+      operationId: getDocument
+      responses:
+        "200":
+          description: Document data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "404":
+          description: Document not found
+        "401":
+          description: Access token is missing or invalid
+    delete:
+      tags:
+        - Document
+      summary: Delete the specified document
+      parameters:
+        - in: path
+          name: id
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the document to operate on
+      operationId: deleteDocument
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Success:
+      type: boolean
+      example: true
+      description: True or false
+    Identifier:
+      type: integer
+      format: int64
+      example: 1
+      description: Unique identifier for the object
+    Calendar:
+      type: object
+      properties:
+        calendarId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the calendar
+        mailboxId:
+          type: integer
+          format: int64
+          example: 1
+          description: Identifier of the associated mailbox
+        name:
+          type: string
+          example: "Calendar"
+          description: Display name for the calendar
+        color:
+          type: string
+          example: "red"
+          description: Color label for the calendar
+        isShared:
+          type: boolean
+          example: true
+          description: True if this is a shared calendar
+    Meeting:
+      type: object
+      properties:
+        meetingId:
+          type: integer
+          format: int64
+          example: 1
+          description: Unique identifier for the meeting
+        calendarId:
+          type: integer
+          format: int64
+          example: 1
+          description: Identifier of the associated calendar
+        title:
+          type: string
+          example: "Securities Regulation"
+          description: Title of the meeting
+        startTime:
+          type: string
+          format: date-time
+          example: "2025-10-29T14:00:00+01:00"
+          description: Start time of the meeting in ISO 8601 format
+        endTime:
+          type: string
+          format: date-time
+          example: "2025-10-29T15:00:00+01:00"
+          description: End time of the meeting in ISO 8601 format
+        timeZone:
+          type: string
+          example: "Europe/Amsterdam"
+          description: Time zone of the meeting
+        isAllDay:
+          type: boolean
+          example: false
+          description: True if this is an all-day event
+        organizerEmail:
+          type: string
+          format: email
+          example: "mevdschee@103mail.com"
+          description: Email address of the meeting organizer
+        organizerName:
+          type: string
+          format: full-name
+          example: "Maurits van der Schee"
+          description: Display name of the meeting organizer
+        description:
+          type: string
+          example: "Meeting about Securities Regulation"
+          description: Description of the meeting
+        willAttend:
+          type: [string, "null"]
+          enum: ["yes", "no", "maybe", null]
+          example: "yes"
+          description: Attendance status for the meeting
+        widthFraction:
+          type: number
+          format: float
+          example: 1.0
+          description: Width fraction for display purposes
+        horizontalPosition:
+          type: integer
+          format: int32
+          example: 0
+          description: Horizontal position for display purposes
+    Document:
+      type: object
+      properties:
+        fileName:
+          type: string
+          example: "presentation.pdf"
+          description: Name of the file
+        mimeType:
+          type: string
+          example: "application/pdf"
+          description: MIME type of the file
+        fileSize:
+          type: integer
+          format: int64
+          example: 1024
+          description: Size of the file in bytes
+        fileData:
+          type: string
+          format: byte
+          description: Base64-encoded file data

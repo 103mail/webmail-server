@@ -1,0 +1,113 @@
+openapi: 3.1.1
+info:
+  title: 103mail API - v1 - Auth
+  description: 'API end-points for authentication.'
+  termsOfService: https://www.103mail.com/terms
+  contact:
+    email: maurits@vdschee.nl
+  version: 1.0.0
+externalDocs:
+  description: 103mail website
+  url: https://www.103mail.com/
+servers:
+  - url: https://www.103mail.com/api/v1/auth
+tags:
+  - name: Auth
+security:
+  - bearerAuth: []
+paths:
+  /token:
+    get:
+      tags:
+        - Auth
+      summary: Test token validity and get user details for the logged in account
+      operationId: testToken
+      responses:
+        '200':
+          description: User details (token is valid)
+          content:
+            application/json:
+              schema:
+                 $ref: '#/components/schemas/User'
+        '401':
+          description: Access token is missing or invalid
+    post:
+      tags:
+        - Auth
+      security: []
+      summary: Login and get an API token to use in the Authorization header
+      operationId: getToken
+      requestBody:
+        description: Request to create or retrieve an API (bearer) token for an acount
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: 'WebClient'
+                  description: Name of the token to create (or retrieve)
+                email:
+                  type: string
+                  format: email
+                  example: 'maurits@vdschee.nl'
+                  description: Email address of the account to create a token for
+                password:
+                  type: string
+                  format: password
+                  example: 'bu6wad5Vaeghohxaighu'
+                  description: Password of the account to create a token for
+              required:
+                - email
+                - password
+      responses:
+        '200':
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                 $ref: '#/components/schemas/Token'
+        '403':
+          description: Username/password combination is invalid
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    User:
+      type: object
+      properties:
+        userId:
+          type: integer
+          format: int64
+          example: 12
+          description: Unique identifier for the user
+        customerId:
+          type: integer
+          format: int64
+          example: 5
+          description: Unique identifier for the customer
+        email:
+          type: string
+          format: email
+          example: 'maurits@vdschee.nl'
+          description: Email address of the logged in user
+        name:
+          type: string
+          format: full-name
+          example: 'Maurits van der Schee'
+          description: Name of the logged in user
+    Token:
+      type: object
+      properties:
+        name:
+          type: string
+          example: WebClient
+          description: Name of the token
+        value:
+          type: string
+          example: 417bf4686e8bbe528514923c046874c9
+          description: Value of the token

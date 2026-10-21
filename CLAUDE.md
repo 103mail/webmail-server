@@ -134,6 +134,6 @@ adapted to Go. See `docs/adr/` for the reasoning behind each.
 
 - `docs/adr/` records architecture decisions. Add an ADR when a decision changes
   rather than editing history.
-- Maintain an OpenAPI spec for the API, as the PHP repo does under
-  `web/openapi/`.
+- Maintain the OpenAPI spec in `docs/openapi/v1/` for every route `Handler`
+  serves. `internal/api/openapi_test.go` fails when the two disagree.
 - Maintain installation and operation notes for Debian based servers.

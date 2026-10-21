@@ -1,0 +1,137 @@
+openapi: 3.1.1
+info:
+  title: 103mail API - v1 - Internal
+  description: >-
+    Endpoints for the infrastructure around the Server rather than for the
+    client. The chat bridge is called by ws2api, which turns each WebSocket
+    connection into these three plain HTTP requests (ADR 13). It is
+    authenticated only by knowing a ClientId, so the reverse proxy never
+    forwards `/wsoverhttp/` and it is reachable only from inside the Domain
+    network. The frame format is in ADR 18. The health check is also proxied
+    publicly at `/health`.
+  termsOfService: https://www.103mail.com/terms
+  contact:
+    email: maurits@vdschee.nl
+  version: 1.0.0
+servers:
+  - url: http://api:8080
+    description: The API container as the other services in `deploy/` reach it
+tags:
+  - name: Chat bridge
+  - name: Health
+security: []
+paths:
+  /wsoverhttp/{clientId}:
+    parameters:
+      - in: path
+        name: clientId
+        schema:
+          type: string
+        required: true
+        description: ClientId from `POST /api/v1/chat/session`
+    get:
+      tags:
+        - Chat bridge
+      summary: Claim a ClientId when the client opens its WebSocket
+      description: >-
+        The proxy accepts the upgrade only when the body is exactly `ok`. A
+        ClientId can be claimed once.
+      operationId: connectSocket
+      responses:
+        "200":
+          description: "`ok` to accept the connection, `denied` to refuse it"
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - ok
+                  - denied
+        "400":
+          description: The ClientId is empty or contains a slash
+        "503":
+          description: The chat bridge is not configured
+    post:
+      tags:
+        - Chat bridge
+      summary: Handle one frame the client sent
+      description: >-
+        Whatever comes back is written to the same socket. An empty body means
+        the handler has nothing to say.
+      operationId: handleFrame
+      requestBody:
+        required: true
+        description: One client frame, at most 64 KiB
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Frame"
+      responses:
+        "200":
+          description: The frame to write back, possibly empty
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Frame"
+        "400":
+          description: The ClientId is empty or contains a slash
+        "503":
+          description: The chat bridge is not configured
+    delete:
+      tags:
+        - Chat bridge
+      summary: Release a ClientId when its WebSocket closes
+      operationId: disconnectSocket
+      requestBody:
+        required: false
+        description: The close reason, at most 1 KiB
+        content:
+          text/plain:
+            schema:
+              type: string
+      responses:
+        "200":
+          description: Always `ok`
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - ok
+        "400":
+          description: The ClientId is empty or contains a slash
+        "503":
+          description: The chat bridge is not configured
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Liveness check
+      description: Answers on any method, without touching the database.
+      operationId: health
+      responses:
+        "200":
+          description: The process is serving
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+components:
+  schemas:
+    Frame:
+      type: object
+      description: A chat frame as described in ADR 18
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          example: error
+        error:
+          type: string
+          example: frame too large
+      additionalProperties: true
