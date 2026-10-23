@@ -90,7 +90,7 @@ adapted to Go. See `docs/adr/` for the reasoning behind each.
 
 ## Go conventions
 
-- Module path `github.com/mevdschee/webmail-server`, matching the sibling Go
+- Module path `github.com/103mail/webmail-server`, matching the sibling Go
   repos.
 - `cmd/` holds binaries (API server, workers). `internal/` holds everything else.
   `pkg/` only for code genuinely meant for outside consumers.

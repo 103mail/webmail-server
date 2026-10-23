@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/mevdschee/webmail-server/schema"
+	"github.com/103mail/webmail-server/schema"
 )
 
 // CreateSchema creates the tables and search indexes in an empty database and

@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // Identity is the caller a bearer token resolves to. A zero CustomerID means

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/mailer"
-	"github.com/mevdschee/webmail-server/internal/store"
-	"github.com/mevdschee/webmail-server/internal/store/storetest"
+	"github.com/103mail/webmail-server/internal/mailer"
+	"github.com/103mail/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/store/storetest"
 )
 
 // Send against a real database: SQLite by default, PostgreSQL when

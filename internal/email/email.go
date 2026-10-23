@@ -18,9 +18,9 @@ import (
 
 	crand "crypto/rand"
 
-	"github.com/mevdschee/webmail-server/internal/blob"
-	"github.com/mevdschee/webmail-server/internal/federation"
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/blob"
+	"github.com/103mail/webmail-server/internal/federation"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // Notifier sends one notification email. It is what *notify.Service satisfies,

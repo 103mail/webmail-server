@@ -17,10 +17,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/blob"
-	"github.com/mevdschee/webmail-server/internal/mdconv"
-	"github.com/mevdschee/webmail-server/internal/rrule"
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/blob"
+	"github.com/103mail/webmail-server/internal/mdconv"
+	"github.com/103mail/webmail-server/internal/rrule"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // Service implements the calendar domain.

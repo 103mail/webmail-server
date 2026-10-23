@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/store"
-	"github.com/mevdschee/webmail-server/internal/store/storetest"
+	"github.com/103mail/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/store/storetest"
 )
 
 func TestPlaceholders(t *testing.T) {

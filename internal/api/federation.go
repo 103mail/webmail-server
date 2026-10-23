@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/mevdschee/webmail-server/internal/federation"
+	"github.com/103mail/webmail-server/internal/federation"
 )
 
 // The federation endpoints. They are the one part of the API that is not

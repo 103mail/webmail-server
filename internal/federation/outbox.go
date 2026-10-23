@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // Outbound is one envelope the mail domain wants delivered to one peer. It is

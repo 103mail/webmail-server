@@ -13,14 +13,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mevdschee/webmail-server/internal/auth"
-	"github.com/mevdschee/webmail-server/internal/calendar"
-	"github.com/mevdschee/webmail-server/internal/chat"
-	"github.com/mevdschee/webmail-server/internal/config"
-	"github.com/mevdschee/webmail-server/internal/email"
-	"github.com/mevdschee/webmail-server/internal/federation"
-	"github.com/mevdschee/webmail-server/internal/mailer"
-	"github.com/mevdschee/webmail-server/internal/wsbridge"
+	"github.com/103mail/webmail-server/internal/auth"
+	"github.com/103mail/webmail-server/internal/calendar"
+	"github.com/103mail/webmail-server/internal/chat"
+	"github.com/103mail/webmail-server/internal/config"
+	"github.com/103mail/webmail-server/internal/email"
+	"github.com/103mail/webmail-server/internal/federation"
+	"github.com/103mail/webmail-server/internal/mailer"
+	"github.com/103mail/webmail-server/internal/wsbridge"
 )
 
 // Server routes API requests to the domain services.

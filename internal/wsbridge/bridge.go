@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/chat"
+	"github.com/103mail/webmail-server/internal/chat"
 )
 
 // Service is the bridge between ws2api and the chat domain.

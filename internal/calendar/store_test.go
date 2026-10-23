@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/blob"
-	"github.com/mevdschee/webmail-server/internal/store"
-	"github.com/mevdschee/webmail-server/internal/store/storetest"
+	"github.com/103mail/webmail-server/internal/blob"
+	"github.com/103mail/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/store/storetest"
 )
 
 // Against a real database: SQLite by default, PostgreSQL when

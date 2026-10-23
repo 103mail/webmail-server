@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/mevdschee/webmail-server/internal/email"
-	"github.com/mevdschee/webmail-server/internal/mailer"
+	"github.com/103mail/webmail-server/internal/email"
+	"github.com/103mail/webmail-server/internal/mailer"
 )
 
 // handleInboundMail accepts one received message from Amazon SES.

@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"github.com/mevdschee/webmail-server/internal/chat"
+	"github.com/103mail/webmail-server/internal/chat"
 )
 
 // handleChat implements /api/v1/chat/{entity}/{id}.

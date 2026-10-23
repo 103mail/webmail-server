@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // SessionTTL is how long a minted ClientId may go unclaimed. It only has to

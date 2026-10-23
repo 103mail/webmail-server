@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"github.com/mevdschee/webmail-server/internal/federation"
+	"github.com/103mail/webmail-server/internal/federation"
 )
 
 // ControlHandler serves the read-only controls the end-to-end suite uses to

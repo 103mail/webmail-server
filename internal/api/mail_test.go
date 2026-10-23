@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mevdschee/webmail-server/internal/config"
-	"github.com/mevdschee/webmail-server/internal/mailer"
+	"github.com/103mail/webmail-server/internal/config"
+	"github.com/103mail/webmail-server/internal/mailer"
 )
 
 func TestRecipientsOfPrefersEnvelopeAndDeduplicates(t *testing.T) {

@@ -1,4 +1,4 @@
-module github.com/mevdschee/webmail-server
+module github.com/103mail/webmail-server
 
 go 1.25.0
 

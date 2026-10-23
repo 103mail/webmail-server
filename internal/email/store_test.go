@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/blob"
-	"github.com/mevdschee/webmail-server/internal/federation"
-	"github.com/mevdschee/webmail-server/internal/store"
-	"github.com/mevdschee/webmail-server/internal/store/storetest"
+	"github.com/103mail/webmail-server/internal/blob"
+	"github.com/103mail/webmail-server/internal/federation"
+	"github.com/103mail/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/store/storetest"
 )
 
 // These tests run the mail domain's queries against a real database: SQLite

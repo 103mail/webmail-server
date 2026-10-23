@@ -7,9 +7,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mevdschee/webmail-server/internal/federation"
-	"github.com/mevdschee/webmail-server/internal/mdconv"
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/federation"
+	"github.com/103mail/webmail-server/internal/mdconv"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // DeliverInbound writes an envelope accepted from a peer, satisfying

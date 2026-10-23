@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/calendar"
+	"github.com/103mail/webmail-server/internal/calendar"
 )
 
 // handleCalendar implements /api/v1/calendar/{entity}/{id}.

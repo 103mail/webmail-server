@@ -11,12 +11,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mevdschee/webmail-server/internal/auth"
-	"github.com/mevdschee/webmail-server/internal/blob"
-	"github.com/mevdschee/webmail-server/internal/config"
-	"github.com/mevdschee/webmail-server/internal/email"
-	"github.com/mevdschee/webmail-server/internal/store"
-	"github.com/mevdschee/webmail-server/internal/store/storetest"
+	"github.com/103mail/webmail-server/internal/auth"
+	"github.com/103mail/webmail-server/internal/blob"
+	"github.com/103mail/webmail-server/internal/config"
+	"github.com/103mail/webmail-server/internal/email"
+	"github.com/103mail/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/store/storetest"
 )
 
 // apiStack is a Server on an SQLite database hosting example.test, with

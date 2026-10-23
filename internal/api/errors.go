@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/mevdschee/webmail-server/internal/rrule"
+	"github.com/103mail/webmail-server/internal/rrule"
 )
 
 // isBadInput reports whether an error is the caller's fault rather than the

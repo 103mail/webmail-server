@@ -9,9 +9,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mevdschee/webmail-server/internal/federation"
-	"github.com/mevdschee/webmail-server/internal/mdconv"
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/federation"
+	"github.com/103mail/webmail-server/internal/mdconv"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // AddThread starts a new conversation in a folder and delivers the first

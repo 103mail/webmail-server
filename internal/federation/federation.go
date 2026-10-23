@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // Timing rules, all from the RFC. They are constants rather than settings

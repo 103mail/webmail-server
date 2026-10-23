@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/federation"
-	"github.com/mevdschee/webmail-server/internal/mdconv"
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/federation"
+	"github.com/103mail/webmail-server/internal/mdconv"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // federate queues one envelope per destination Domain for the subscribers this

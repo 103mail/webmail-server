@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/store/storetest"
+	"github.com/103mail/webmail-server/internal/store/storetest"
 )
 
 func testKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {

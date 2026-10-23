@@ -4,7 +4,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/mevdschee/webmail-server/internal/email"
+	"github.com/103mail/webmail-server/internal/email"
 )
 
 // handleEmail implements /api/v1/email/{entity}/{id}.

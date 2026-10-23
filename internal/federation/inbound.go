@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // Request is one inbound POST, reduced to what the protocol authenticates: the

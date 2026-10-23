@@ -16,8 +16,8 @@ import (
 
 	"github.com/yuin/goldmark"
 
-	"github.com/mevdschee/webmail-server/internal/mailer"
-	"github.com/mevdschee/webmail-server/internal/store"
+	"github.com/103mail/webmail-server/internal/mailer"
+	"github.com/103mail/webmail-server/internal/store"
 )
 
 // ErrNoTemplate reports that no email_template row matches the requested name.
