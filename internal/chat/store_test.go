@@ -209,6 +209,18 @@ func TestChatLifecycle(t *testing.T) {
 	if chats, _ := f.svc.ListChats(f.ctx, bob.customerID, bob.mailboxID, ""); len(chats) != 0 {
 		t.Error("Bob still sees the chat he deleted")
 	}
+
+	// A new message brings a deleted chat back, history included.
+	if _, err := f.svc.AddMessage(f.ctx, alice.customerID, chatID, "Are you still there?", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	chats, err = f.svc.ListChats(f.ctx, bob.customerID, bob.mailboxID, "")
+	if err != nil || len(chats) != 1 || chats[0].ChatID != bobChat || chats[0].UnreadCount != 1 {
+		t.Fatalf("Bob's chats after a new message = %+v, %v", chats, err)
+	}
+	if messages, _ := f.svc.ListMessages(f.ctx, bob.customerID, bobChat, ""); len(messages) != 2 {
+		t.Errorf("Bob sees %d messages in the restored chat, want 2", len(messages))
+	}
 }
 
 func TestPresenceAndTyping(t *testing.T) {

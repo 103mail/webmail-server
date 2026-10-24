@@ -37,6 +37,13 @@ Membership is `g_chat_participant` with `joined_at` and `left_at`. A new
 participant sees all prior history. Someone who left keeps read-only access to
 messages sent before `left_at` and receives nothing after it.
 
+Deleting a chat is not leaving it. It sets `deleted_at` on the caller's own
+`chat` projection and hides the chat from them, but they stay a participant,
+so messages keep arriving. The next message clears `deleted_at` and the chat
+comes back with its whole history, as in most chat apps. The PHP backend kept a
+deleted chat hidden for good, which left its owner unreachable in it while
+the others saw them as a member. To stop receiving messages, leave instead.
+
 ## Consequences
 
 - Typing indicators and presence are high-frequency and low-value. They must not

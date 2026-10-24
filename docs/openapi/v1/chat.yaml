@@ -179,6 +179,10 @@ paths:
       tags:
         - Chat
       summary: Delete the specified chat
+      description: >-
+        Hides the chat from the caller only. They remain a participant, and
+        the next message in the chat restores it with its history. Remove the
+        participant to leave the chat instead.
       parameters:
         - in: path
           name: id

@@ -462,7 +462,8 @@ func (s *Service) EditChat(ctx context.Context, customerID, chatID int64,
 	})
 }
 
-// DeleteChat hides a chat from the caller. Other participants keep theirs.
+// DeleteChat hides a chat from the caller until the next message in it. Other
+// participants keep theirs.
 func (s *Service) DeleteChat(ctx context.Context, customerID, chatID int64) (bool, error) {
 	n, err := store.Affected(ctx, s.db,
 		`UPDATE "chat" SET "deleted_at" = ? WHERE "customer_id" = ? AND "id" = ?`,
@@ -703,7 +704,8 @@ func (s *Service) deliveryStatuses(ctx context.Context, gMessageIDs []int64) (ma
 	return out, rows.Err()
 }
 
-// AddMessage sends a message to every active participant of a chat.
+// AddMessage sends a message to every active participant of a chat, restoring
+// it for anyone who had deleted it.
 func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 	body, bodyHTML string, attachments []NewAttachment) (int64, error) {
 	var messageID int64
@@ -784,6 +786,12 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 				participantCustomerID, participantChatID, gMessageID, now)
 			if err != nil {
 				return fmt.Errorf("create chat message projection: %w", err)
+			}
+			// Deleting a chat only hides it until someone writes in it again.
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE "chat" SET "deleted_at" = NULL WHERE "id" = ? AND "deleted_at" IS NOT NULL`,
+				participantChatID); err != nil {
+				return fmt.Errorf("restore deleted chat: %w", err)
 			}
 			status := "delivered"
 			if email == senderEmail {
