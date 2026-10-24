@@ -107,6 +107,21 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, req *request
 		}
 		return nil, http.StatusMethodNotAllowed
 
+	case "read":
+		// What the socket's read frame does, for a client that has no socket.
+		id := parseID(req.ID)
+		if id == 0 {
+			return nil, http.StatusBadRequest
+		}
+		if req.Method != http.MethodPut {
+			return nil, http.StatusMethodNotAllowed
+		}
+		if err := s.chat.MarkChatRead(ctx, customerID, id); err != nil {
+			s.fail(w, r, err)
+			return nil, 0
+		}
+		return true, http.StatusOK
+
 	case "message":
 		id := parseID(req.ID)
 		if id == 0 {

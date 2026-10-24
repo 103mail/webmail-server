@@ -300,6 +300,34 @@ paths:
           description: Access token is missing or invalid
         "501":
           description: Not yet implemented
+  /read/{chatId}:
+    put:
+      tags:
+        - Chat
+      summary: Mark the specified chat read
+      description: >-
+        Marks every message in the chat read for the caller and clears its
+        unread count, which also counts as read in the senders' delivery
+        status. It is what the WebSocket's read frame does, for a client that
+        has no socket.
+      parameters:
+        - in: path
+          name: chatId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the chat to operate on
+      operationId: markChatRead
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "401":
+          description: Access token is missing or invalid
   /message/{id}:
     get:
       tags:

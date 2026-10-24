@@ -13,6 +13,7 @@ import (
 
 	"github.com/103mail/webmail-server/internal/auth"
 	"github.com/103mail/webmail-server/internal/blob"
+	"github.com/103mail/webmail-server/internal/chat"
 	"github.com/103mail/webmail-server/internal/config"
 	"github.com/103mail/webmail-server/internal/email"
 	"github.com/103mail/webmail-server/internal/store"
@@ -25,6 +26,7 @@ type apiStack struct {
 	t      *testing.T
 	db     *store.DB
 	mail   *email.Service
+	chat   *chat.Service
 	server *Server
 }
 
@@ -34,10 +36,12 @@ func newAPIStack(t *testing.T) *apiStack {
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO "domain" ("name") VALUES ('example.test')`); err != nil {
 		t.Fatal(err)
 	}
-	mail := email.New(db, blob.New(t.TempDir()), nil, nil, nil)
-	return &apiStack{t: t, db: db, mail: mail,
+	files := blob.New(t.TempDir())
+	mail := email.New(db, files, nil, nil, nil)
+	chats := chat.New(db, files)
+	return &apiStack{t: t, db: db, mail: mail, chat: chats,
 		server: New(&config.Config{MaxBodyBytes: 1 << 20}, slog.New(slog.NewTextHandler(io.Discard, nil)),
-			auth.New(db), mail, nil, nil, nil, nil, nil, nil)}
+			auth.New(db), mail, nil, chats, nil, nil, nil, nil)}
 }
 
 // account creates someone whose bearer token is their address, and returns
