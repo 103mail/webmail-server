@@ -123,11 +123,11 @@ paths:
                 name:
                   type: string
                   example: "mevdschee"
-                  description: New display name for the mailbox
+                  description: New display name for the mailbox; left unchanged when omitted
                 color:
                   type: string
                   example: "blue"
-                  description: New color for the mailbox
+                  description: New color for the mailbox; left unchanged when omitted
                 isDefault:
                   type: boolean
                   example: true

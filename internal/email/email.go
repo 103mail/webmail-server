@@ -1128,11 +1128,20 @@ func (s *Service) EditMailbox(ctx context.Context, customerID, userID, mailboxID
 	name, color string, isDefault, isShared *bool, senderEmail, senderName string) (bool, error) {
 	senderEmail = store.Address(senderEmail)
 	return true, s.db.Tx(ctx, func(tx *sql.Tx) error {
+		// The PHP set the colour only together with the name, and reset it to
+		// red when an edit left it out. Each is now kept unless it is sent.
 		if name != "" {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE "mailbox" SET "name" = ?, "color" = ? WHERE "customer_id" = ? AND "id" = ?`,
-				name, color, customerID, mailboxID); err != nil {
+				`UPDATE "mailbox" SET "name" = ? WHERE "customer_id" = ? AND "id" = ?`,
+				name, customerID, mailboxID); err != nil {
 				return fmt.Errorf("rename mailbox: %w", err)
+			}
+		}
+		if color != "" {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE "mailbox" SET "color" = ? WHERE "customer_id" = ? AND "id" = ?`,
+				color, customerID, mailboxID); err != nil {
+				return fmt.Errorf("recolour mailbox: %w", err)
 			}
 		}
 		if isDefault != nil && *isDefault {

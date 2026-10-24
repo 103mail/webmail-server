@@ -74,12 +74,8 @@ func (s *Server) handleEmail(w http.ResponseWriter, r *http.Request, req *reques
 			out, err := s.email.AddMailbox(ctx, customerID, req.str("name"), color, senderEmail, senderName)
 			return s.result(w, r, out, err)
 		case http.MethodPut:
-			color := req.str("color")
-			if color == "" {
-				color = "red"
-			}
 			out, err := s.email.EditMailbox(ctx, customerID, req.Identity.UserID, parseID(req.ID),
-				req.str("name"), color, req.boolPtr("isDefault"), req.boolPtr("isShared"),
+				req.str("name"), req.str("color"), req.boolPtr("isDefault"), req.boolPtr("isShared"),
 				req.str("senderEmail"), req.str("senderName"))
 			return s.result(w, r, out, err)
 		case http.MethodDelete:

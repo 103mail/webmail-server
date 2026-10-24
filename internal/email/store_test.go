@@ -958,6 +958,17 @@ func TestFoldersAndMailboxes(t *testing.T) {
 	if err != nil || len(mailboxes) != 2 || !mailboxes[1].IsShared || mailboxes[1].Color != "green" {
 		t.Fatalf("ListMailboxes = %+v, %v", mailboxes, err)
 	}
+	// The colour and the name are each kept when an edit leaves them out, so
+	// settings can change one without sending the other.
+	if _, err := f.svc.EditMailbox(f.ctx, alice, 0, second, "", "purple", nil, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.EditMailbox(f.ctx, alice, 0, second, "Office", "", nil, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if mailboxes, _ := f.svc.ListMailboxes(f.ctx, alice, ""); mailboxes[1].Name != "Office" || mailboxes[1].Color != "purple" {
+		t.Errorf("after editing colour, then name: %q in %q, want Office in purple", mailboxes[1].Name, mailboxes[1].Color)
+	}
 	if ok, _ := f.svc.DeleteMailbox(f.ctx, alice, mailbox); ok {
 		t.Error("the default mailbox was deleted")
 	}
