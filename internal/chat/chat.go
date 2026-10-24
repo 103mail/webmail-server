@@ -69,6 +69,8 @@ type MessagePreview struct {
 	Body            string `json:"body"`
 	CreatedAt       string `json:"createdAt"`
 	AttachmentCount int64  `json:"attachmentCount"`
+	// DeliveryStatus is what a chat list shows as ticks on your own message.
+	DeliveryStatus *DeliveryStatus `json:"deliveryStatus"`
 }
 
 // Participant is a chat member with presence and membership dates.
@@ -254,7 +256,8 @@ func (s *Service) ListChats(ctx context.Context, customerID, mailboxID int64, se
 func (s *Service) lastMessages(ctx context.Context, customerID int64, chatIDs []int64) (map[int64]*MessagePreview, error) {
 	in := store.Placeholders(len(chatIDs))
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT "chat_message"."chat_id", "g_chat_message"."sender_email", "g_chat_message"."sender_name", `+
+		`SELECT "chat_message"."chat_id", "g_chat_message"."id", `+
+			`"g_chat_message"."sender_email", "g_chat_message"."sender_name", `+
 			`"g_chat_message"."body", "g_chat_message"."created_at", `+
 			`(SELECT COUNT(*) FROM "g_chat_attachment" `+
 			`WHERE "g_chat_attachment"."g_chat_message_id" = "g_chat_message"."id") FROM "chat_message" `+
@@ -270,12 +273,14 @@ func (s *Service) lastMessages(ctx context.Context, customerID int64, chatIDs []
 	defer rows.Close()
 
 	out := map[int64]*MessagePreview{}
+	gByChat := map[int64]int64{}
+	var gMessageIDs []int64
 	for rows.Next() {
-		var chatID int64
+		var chatID, gMessageID int64
 		var p MessagePreview
 		var senderName sql.NullString
 		var createdAt store.NullTime
-		if err := rows.Scan(&chatID, &p.SenderEmail, &senderName, &p.Body, &createdAt,
+		if err := rows.Scan(&chatID, &gMessageID, &p.SenderEmail, &senderName, &p.Body, &createdAt,
 			&p.AttachmentCount); err != nil {
 			return nil, fmt.Errorf("scan last chat message: %w", err)
 		}
@@ -284,8 +289,25 @@ func (s *Service) lastMessages(ctx context.Context, customerID int64, chatIDs []
 			p.CreatedAt = rfc3339(createdAt.Time)
 		}
 		out[chatID] = &p
+		gByChat[chatID] = gMessageID
+		gMessageIDs = append(gMessageIDs, gMessageID)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list last chat messages: %w", err)
+	}
+	if len(gMessageIDs) == 0 {
+		return out, nil
+	}
+	statuses, err := s.deliveryStatuses(ctx, gMessageIDs)
+	if err != nil {
+		return nil, err
+	}
+	for chatID, p := range out {
+		if st, ok := statuses[gByChat[chatID]]; ok {
+			p.DeliveryStatus = &st
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) participantsByChat(ctx context.Context, customerID int64, gChatIDs []int64) (map[int64][]ParticipantRef, error) {

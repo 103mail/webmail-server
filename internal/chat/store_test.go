@@ -118,6 +118,11 @@ func TestChatLifecycle(t *testing.T) {
 		p.CreatedAt != "2026-10-20T09:01:00+00:00" {
 		t.Errorf("last message %+v", chats[0].LastMessage)
 	}
+	// The sender's own copy is read on sending; Bob has not read his yet.
+	if p := chats[0].LastMessage; p == nil || p.DeliveryStatus == nil ||
+		p.DeliveryStatus.Sent != 2 || p.DeliveryStatus.Read != 1 {
+		t.Errorf("last message delivery status %+v", p)
+	}
 	if chats[1].LastMessage != nil {
 		t.Errorf("a chat without messages previews %+v", chats[1].LastMessage)
 	}

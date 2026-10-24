@@ -744,6 +744,19 @@ components:
               type: integer
               format: int32
               example: 0
+            deliveryStatus:
+              type: [object, "null"]
+              description: How many participants the message reached and how many read it
+              properties:
+                sent:
+                  type: integer
+                  example: 2
+                delivered:
+                  type: integer
+                  example: 2
+                read:
+                  type: integer
+                  example: 1
     Participant:
       type: object
       properties:
