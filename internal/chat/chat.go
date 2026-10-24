@@ -390,6 +390,23 @@ func (s *Service) AddChat(ctx context.Context, customerID, mailboxID int64,
 				return err
 			}
 		}
+		// A group starts with its creator saying so, which is how its members
+		// learn they are in it, and how another Domain will (RFC §14.3). A
+		// direct chat says nothing until someone writes.
+		if chatType == "group" && name != nil {
+			creatorName, err := store.SelectString(ctx, tx,
+				`SELECT "name" FROM "alias" WHERE "customer_id" = ? AND "email" = ? LIMIT 1`, customerID, creator)
+			if err != nil {
+				return fmt.Errorf("look up creator name: %w", err)
+			}
+			if creatorName == "" {
+				creatorName = creator
+			}
+			if _, err := s.addMessage(ctx, tx, customerID, chatID,
+				creatorName+" created the group "+*name, "", nil); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	return chatID, err
@@ -542,9 +559,46 @@ func (s *Service) AddParticipant(ctx context.Context, customerID, chatID int64, 
 		if err != nil {
 			return fmt.Errorf("add participant: %w", err)
 		}
-		return projectChat(ctx, tx, gChatID, email)
+		if err := projectChat(ctx, tx, gChatID, email); err != nil {
+			return err
+		}
+		return projectHistory(ctx, tx, gChatID, email, s.db.Now())
 	})
 	return participantID, err
+}
+
+// projectHistory gives someone who joined a chat every message written in it
+// before, as ADR 9 says a new participant sees all prior history. The messages
+// are read, because nobody was waiting for them: joining a busy chat must not
+// leave a wall of unread behind. A message they already have, from before they
+// left and came back, is not given twice.
+func projectHistory(ctx context.Context, tx *sql.Tx, gChatID int64, email string, now time.Time) error {
+	var customerID, chatID int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT "chat"."customer_id", "chat"."id" FROM "chat" `+
+			`JOIN "alias" ON "alias"."customer_id" = "chat"."customer_id" `+
+			`WHERE "alias"."email" = ? AND "chat"."g_chat_id" = ? LIMIT 1`, email, gChatID).Scan(&customerID, &chatID)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("look up chat projection: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO "chat_message" ("customer_id", "chat_id", "g_chat_message_id", "delivered_at", "read_at") `+
+			`SELECT ?, ?, "g_chat_message"."id", ?, ? FROM "g_chat_message" `+
+			`WHERE "g_chat_message"."g_chat_id" = ? AND "g_chat_message"."deleted_at" IS NULL `+
+			`AND NOT EXISTS (SELECT 1 FROM "chat_message" "mine" WHERE "mine"."chat_id" = ? `+
+			`AND "mine"."g_chat_message_id" = "g_chat_message"."id")`,
+		customerID, chatID, now, now, gChatID, chatID); err != nil {
+		return fmt.Errorf("project chat history: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE "chat" SET "last_read_message_id" = (SELECT MAX("id") FROM "g_chat_message" `+
+			`WHERE "g_chat_id" = ? AND "deleted_at" IS NULL) WHERE "id" = ?`, gChatID, chatID); err != nil {
+		return fmt.Errorf("advance read marker: %w", err)
+	}
+	return nil
 }
 
 // RemoveParticipant marks a member as having left. Their history stays.
@@ -704,118 +758,137 @@ func (s *Service) deliveryStatuses(ctx context.Context, gMessageIDs []int64) (ma
 	return out, rows.Err()
 }
 
+// NotMemberError refuses a message from someone who is not in the chat, for
+// example because they left it.
+type NotMemberError struct {
+	Address string
+}
+
+func (e *NotMemberError) Error() string { return e.Address + " is not a member of this chat" }
+
 // AddMessage sends a message to every active participant of a chat, restoring
 // it for anyone who had deleted it.
 func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 	body, bodyHTML string, attachments []NewAttachment) (int64, error) {
 	var messageID int64
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		var gChatID, mailboxID int64
-		err := tx.QueryRowContext(ctx,
-			`SELECT "g_chat_id", "mailbox_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
-			customerID, chatID).Scan(&gChatID, &mailboxID)
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("look up chat: %w", err)
-		}
-		var senderEmail, senderName string
-		err = tx.QueryRowContext(ctx,
-			`SELECT "email", "name" FROM "alias" WHERE "customer_id" = ? AND "mailbox_id" = ? LIMIT 1`,
-			customerID, mailboxID).Scan(&senderEmail, &senderName)
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("look up sender alias: %w", err)
-		}
-
-		participants, err := store.SelectStrings(ctx, tx,
-			`SELECT "email" FROM "g_chat_participant" WHERE "g_chat_id" = ? AND "left_at" IS NULL`, gChatID)
-		if err != nil {
-			return fmt.Errorf("list participants: %w", err)
-		}
-		if !contains(participants, senderEmail) {
-			return nil
-		}
-
-		now := s.db.Now()
-		gMessageID, err := store.Insert(ctx, tx,
-			`INSERT INTO "g_chat_message" ("g_chat_id", "sender_email", "sender_name", "body", "body_html", `+
-				`"created_at") VALUES (?,?,?,?,?,?)`,
-			gChatID, senderEmail, senderName, body, nullable(bodyHTML), now)
-		if err != nil {
-			return fmt.Errorf("create chat message: %w", err)
-		}
-		for _, a := range attachments {
-			hash, err := s.blob.Put(a.FileData)
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO "g_chat_attachment" ("g_chat_message_id", "file_name", "mime_type", `+
-					`"file_size", "hash_md5") VALUES (?,?,?,?,?)`,
-				gMessageID, a.FileName, a.MimeType, len(a.FileData), hash); err != nil {
-				return fmt.Errorf("create chat attachment: %w", err)
-			}
-		}
-
-		for _, email := range participants {
-			var participantCustomerID int64
-			err := tx.QueryRowContext(ctx,
-				`SELECT "customer_id" FROM "alias" WHERE "email" = ? LIMIT 1`, email).Scan(&participantCustomerID)
-			if err == sql.ErrNoRows {
-				continue
-			}
-			if err != nil {
-				return fmt.Errorf("look up participant customer: %w", err)
-			}
-			participantChatID, err := store.SelectInt(ctx, tx,
-				`SELECT "id" FROM "chat" WHERE "customer_id" = ? AND "g_chat_id" = ? LIMIT 1`,
-				participantCustomerID, gChatID)
-			if err != nil {
-				return fmt.Errorf("look up participant chat: %w", err)
-			}
-			if participantChatID == 0 {
-				continue
-			}
-			projectionID, err := store.Insert(ctx, tx,
-				`INSERT INTO "chat_message" ("customer_id", "chat_id", "g_chat_message_id", "delivered_at") `+
-					"VALUES (?,?,?,?)",
-				participantCustomerID, participantChatID, gMessageID, now)
-			if err != nil {
-				return fmt.Errorf("create chat message projection: %w", err)
-			}
-			// Deleting a chat only hides it until someone writes in it again.
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE "chat" SET "deleted_at" = NULL WHERE "id" = ? AND "deleted_at" IS NOT NULL`,
-				participantChatID); err != nil {
-				return fmt.Errorf("restore deleted chat: %w", err)
-			}
-			status := "delivered"
-			if email == senderEmail {
-				status = "read"
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE "chat_message" SET "read_at" = ? WHERE "id" = ?`, now, projectionID); err != nil {
-					return fmt.Errorf("mark own message read: %w", err)
-				}
-				if _, err := tx.ExecContext(ctx,
-					`UPDATE "chat" SET "last_read_message_id" = ? WHERE "id" = ?`,
-					gMessageID, participantChatID); err != nil {
-					return fmt.Errorf("advance read marker: %w", err)
-				}
-				messageID = projectionID
-			}
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO "message_status" ("g_chat_message_id", "recipient_email", "status", "timestamp") `+
-					"VALUES (?,?,?,?)", gMessageID, email, status, now); err != nil {
-				return fmt.Errorf("record message status: %w", err)
-			}
-		}
-		return nil
+		var err error
+		messageID, err = s.addMessage(ctx, tx, customerID, chatID, body, bodyHTML, attachments)
+		return err
 	})
 	return messageID, err
+}
+
+// addMessage is AddMessage inside a transaction the caller holds. It answers
+// 0 for a chat the caller cannot see, and a NotMemberError for one they are no
+// longer in.
+func (s *Service) addMessage(ctx context.Context, tx *sql.Tx, customerID, chatID int64,
+	body, bodyHTML string, attachments []NewAttachment) (int64, error) {
+	var messageID int64
+	var gChatID, mailboxID int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT "g_chat_id", "mailbox_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
+		customerID, chatID).Scan(&gChatID, &mailboxID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("look up chat: %w", err)
+	}
+	var senderEmail, senderName string
+	err = tx.QueryRowContext(ctx,
+		`SELECT "email", "name" FROM "alias" WHERE "customer_id" = ? AND "mailbox_id" = ? LIMIT 1`,
+		customerID, mailboxID).Scan(&senderEmail, &senderName)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("look up sender alias: %w", err)
+	}
+
+	participants, err := store.SelectStrings(ctx, tx,
+		`SELECT "email" FROM "g_chat_participant" WHERE "g_chat_id" = ? AND "left_at" IS NULL`, gChatID)
+	if err != nil {
+		return 0, fmt.Errorf("list participants: %w", err)
+	}
+	if !contains(participants, senderEmail) {
+		return 0, &NotMemberError{Address: senderEmail}
+	}
+
+	now := s.db.Now()
+	gMessageID, err := store.Insert(ctx, tx,
+		`INSERT INTO "g_chat_message" ("g_chat_id", "sender_email", "sender_name", "body", "body_html", `+
+			`"created_at") VALUES (?,?,?,?,?,?)`,
+		gChatID, senderEmail, senderName, body, nullable(bodyHTML), now)
+	if err != nil {
+		return 0, fmt.Errorf("create chat message: %w", err)
+	}
+	for _, a := range attachments {
+		hash, err := s.blob.Put(a.FileData)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO "g_chat_attachment" ("g_chat_message_id", "file_name", "mime_type", `+
+				`"file_size", "hash_md5") VALUES (?,?,?,?,?)`,
+			gMessageID, a.FileName, a.MimeType, len(a.FileData), hash); err != nil {
+			return 0, fmt.Errorf("create chat attachment: %w", err)
+		}
+	}
+
+	for _, email := range participants {
+		var participantCustomerID int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT "customer_id" FROM "alias" WHERE "email" = ? LIMIT 1`, email).Scan(&participantCustomerID)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("look up participant customer: %w", err)
+		}
+		participantChatID, err := store.SelectInt(ctx, tx,
+			`SELECT "id" FROM "chat" WHERE "customer_id" = ? AND "g_chat_id" = ? LIMIT 1`,
+			participantCustomerID, gChatID)
+		if err != nil {
+			return 0, fmt.Errorf("look up participant chat: %w", err)
+		}
+		if participantChatID == 0 {
+			continue
+		}
+		projectionID, err := store.Insert(ctx, tx,
+			`INSERT INTO "chat_message" ("customer_id", "chat_id", "g_chat_message_id", "delivered_at") `+
+				"VALUES (?,?,?,?)",
+			participantCustomerID, participantChatID, gMessageID, now)
+		if err != nil {
+			return 0, fmt.Errorf("create chat message projection: %w", err)
+		}
+		// Deleting a chat only hides it until someone writes in it again.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE "chat" SET "deleted_at" = NULL WHERE "id" = ? AND "deleted_at" IS NOT NULL`,
+			participantChatID); err != nil {
+			return 0, fmt.Errorf("restore deleted chat: %w", err)
+		}
+		status := "delivered"
+		if email == senderEmail {
+			status = "read"
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE "chat_message" SET "read_at" = ? WHERE "id" = ?`, now, projectionID); err != nil {
+				return 0, fmt.Errorf("mark own message read: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE "chat" SET "last_read_message_id" = ? WHERE "id" = ?`,
+				gMessageID, participantChatID); err != nil {
+				return 0, fmt.Errorf("advance read marker: %w", err)
+			}
+			messageID = projectionID
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO "message_status" ("g_chat_message_id", "recipient_email", "status", "timestamp") `+
+				"VALUES (?,?,?,?)", gMessageID, email, status, now); err != nil {
+			return 0, fmt.Errorf("record message status: %w", err)
+		}
+	}
+	return messageID, nil
 }
 
 func nullable(s string) any {

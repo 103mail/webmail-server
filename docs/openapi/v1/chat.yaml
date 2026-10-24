@@ -79,6 +79,11 @@ paths:
       tags:
         - Chat
       summary: Create a chat in the specified mailbox
+      description: >-
+        A group chat starts with a message from its creator saying they
+        created it, which every member receives. A direct chat has no messages
+        until someone writes. A participant added later receives every earlier
+        message, already read.
       parameters:
         - in: path
           name: id
@@ -423,6 +428,8 @@ paths:
           description: Invalid message data
         "401":
           description: Access token is missing or invalid
+        "403":
+          description: The caller is no longer in the chat (error not_a_member)
         "413":
           description: Attachment too large (max 25MB)
         "501":

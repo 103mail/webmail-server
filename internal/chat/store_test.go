@@ -126,32 +126,34 @@ func TestChatLifecycle(t *testing.T) {
 	if chats[1].LastMessage != nil {
 		t.Errorf("a chat without messages previews %+v", chats[1].LastMessage)
 	}
+	// Unread: the message saying Alice created the group, and her agenda.
 	bobChats, err := f.svc.ListChats(f.ctx, bob.customerID, bob.mailboxID, "")
-	if err != nil || len(bobChats) != 1 || bobChats[0].UnreadCount != 1 {
+	if err != nil || len(bobChats) != 1 || bobChats[0].UnreadCount != 2 {
 		t.Fatalf("Bob's chats = %+v, %v", bobChats, err)
 	}
-	for search, want := range map[string]int{"agenda": 1, "kick*": 1, "alice": 1, "nothing": 0} {
+	// "alice" is in both messages: she sent them, and the first names her.
+	for search, want := range map[string][2]int{"agenda": {1, 1}, "kick*": {1, 1}, "alice": {1, 2}, "nothing": {0, 0}} {
 		found, err := f.svc.ListChats(f.ctx, alice.customerID, alice.mailboxID, search)
 		if err != nil {
 			t.Fatalf("search %q: %v", search, err)
 		}
-		if len(found) != want {
-			t.Errorf("search %q found %d chats, want %d", search, len(found), want)
+		if len(found) != want[0] {
+			t.Errorf("search %q found %d chats, want %d", search, len(found), want[0])
 		}
 		messages, err := f.svc.ListMessages(f.ctx, bob.customerID, bobChat, search)
 		if err != nil {
 			t.Fatalf("search %q in messages: %v", search, err)
 		}
-		if len(messages) != want {
-			t.Errorf("search %q found %d messages, want %d", search, len(messages), want)
+		if len(messages) != want[1] {
+			t.Errorf("search %q found %d messages, want %d", search, len(messages), want[1])
 		}
 	}
 
 	messages, err := f.svc.ListMessages(f.ctx, bob.customerID, bobChat, "")
-	if err != nil || len(messages) != 1 {
+	if err != nil || len(messages) != 2 {
 		t.Fatalf("ListMessages = %+v, %v", messages, err)
 	}
-	m := messages[0]
+	m := messages[0] // newest first: the agenda
 	if m.DeliveryStatus == nil || m.DeliveryStatus.Sent != 2 || m.DeliveryStatus.Read != 1 || len(m.Attachments) != 1 {
 		t.Errorf("message = %+v, status %+v", m, m.DeliveryStatus)
 	}
@@ -218,8 +220,75 @@ func TestChatLifecycle(t *testing.T) {
 	if err != nil || len(chats) != 1 || chats[0].ChatID != bobChat || chats[0].UnreadCount != 1 {
 		t.Fatalf("Bob's chats after a new message = %+v, %v", chats, err)
 	}
-	if messages, _ := f.svc.ListMessages(f.ctx, bob.customerID, bobChat, ""); len(messages) != 2 {
-		t.Errorf("Bob sees %d messages in the restored chat, want 2", len(messages))
+	if messages, _ := f.svc.ListMessages(f.ctx, bob.customerID, bobChat, ""); len(messages) != 3 {
+		t.Errorf("Bob sees %d messages in the restored chat, want 3", len(messages))
+	}
+}
+
+// A group chat starts with a message from its creator saying so, which is how
+// a member learns they are in it. Someone added later sees every earlier
+// message, as ADR 9 says, without any of it counting as unread.
+func TestGroupCreationAndHistory(t *testing.T) {
+	f := newFixture(t)
+	alice := f.person("alice@example.test", "Alice")
+	bob := f.person("bob@example.test", "Bob")
+	carol := f.person("carol@example.test", "Carol")
+
+	name := "Launch"
+	chatID, err := f.svc.AddChat(f.ctx, alice.customerID, alice.mailboxID, "group", &name, []string{"bob@example.test"})
+	if err != nil || chatID == 0 {
+		t.Fatalf("AddChat = %d, %v", chatID, err)
+	}
+	gChatID, err := f.svc.GChatID(f.ctx, alice.customerID, chatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobChat := f.chatOf(bob, gChatID)
+	messages, err := f.svc.ListMessages(f.ctx, bob.customerID, bobChat, "")
+	if err != nil || len(messages) != 1 || messages[0].Body != "Alice created the group Launch" ||
+		messages[0].SenderEmail != "alice@example.test" {
+		t.Fatalf("Bob's messages after creation = %+v, %v", messages, err)
+	}
+	if mine, _ := f.svc.ListChats(f.ctx, alice.customerID, alice.mailboxID, ""); mine[0].UnreadCount != 0 {
+		t.Errorf("Alice has %d unread in the group she created", mine[0].UnreadCount)
+	}
+
+	// A direct chat says nothing until someone writes.
+	direct, err := f.svc.AddChat(f.ctx, alice.customerID, alice.mailboxID, "direct", nil, []string{"bob@example.test"})
+	if err != nil || direct == 0 {
+		t.Fatalf("AddChat direct = %d, %v", direct, err)
+	}
+	if messages, _ := f.svc.ListMessages(f.ctx, alice.customerID, direct, ""); len(messages) != 0 {
+		t.Errorf("a new direct chat has messages %+v", messages)
+	}
+
+	f.now = f.now.Add(time.Minute)
+	if _, err := f.svc.AddMessage(f.ctx, bob.customerID, bobChat, "Draft is in the drive", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := f.svc.AddParticipant(f.ctx, alice.customerID, chatID, "carol@example.test", "member"); err != nil || id == 0 {
+		t.Fatalf("AddParticipant = %d, %v", id, err)
+	}
+	carolChat := f.chatOf(carol, gChatID)
+	messages, err = f.svc.ListMessages(f.ctx, carol.customerID, carolChat, "")
+	if err != nil || len(messages) != 2 || messages[0].Body != "Draft is in the drive" ||
+		messages[1].Body != "Alice created the group Launch" {
+		t.Fatalf("Carol's messages after joining = %+v, %v", messages, err)
+	}
+	chats, err := f.svc.ListChats(f.ctx, carol.customerID, carol.mailboxID, "")
+	if err != nil || len(chats) != 1 || chats[0].UnreadCount != 0 {
+		t.Errorf("Carol's chats after joining = %+v, %v", chats, err)
+	}
+
+	// What is written after she joined reaches her once, as usual.
+	if _, err := f.svc.AddMessage(f.ctx, alice.customerID, chatID, "Welcome, Carol", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if messages, _ := f.svc.ListMessages(f.ctx, carol.customerID, carolChat, ""); len(messages) != 3 {
+		t.Errorf("Carol has %d messages, want 3", len(messages))
+	}
+	if chats, _ := f.svc.ListChats(f.ctx, carol.customerID, carol.mailboxID, ""); chats[0].UnreadCount != 1 {
+		t.Errorf("Carol has %d unread, want 1", chats[0].UnreadCount)
 	}
 }
 

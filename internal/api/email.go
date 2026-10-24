@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/103mail/webmail-server/internal/chat"
 	"github.com/103mail/webmail-server/internal/email"
 )
 
@@ -301,6 +302,10 @@ func (s *Server) result(w http.ResponseWriter, r *http.Request, value any, err e
 	}
 	var notMember *email.NotMemberError
 	if errors.As(err, &notMember) {
+		return map[string]any{"error": "not_a_member", "detail": err.Error()}, http.StatusForbidden
+	}
+	var notInChat *chat.NotMemberError
+	if errors.As(err, &notInChat) {
 		return map[string]any{"error": "not_a_member", "detail": err.Error()}, http.StatusForbidden
 	}
 	var tooLarge *email.TooLargeError

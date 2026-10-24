@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -147,6 +148,10 @@ func (s *Service) message(ctx context.Context, session *chat.Session, frame *Fra
 	}
 
 	messageID, err := s.chat.AddMessage(ctx, session.CustomerID, chatID, frame.Body, "", nil)
+	var notMember *chat.NotMemberError
+	if errors.As(err, &notMember) {
+		return errorFrame(frame.ID, "you are no longer in this chat")
+	}
 	if err != nil {
 		s.log.Error("could not add a chat message", "error", err)
 		return errorFrame(frame.ID, "could not send the message")
