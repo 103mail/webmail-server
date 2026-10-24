@@ -145,9 +145,12 @@ type Party struct {
 
 // Mailbox is a user's mailbox with its default sending identity.
 type Mailbox struct {
-	MailboxID   int64  `json:"mailboxId"`
-	Name        string `json:"name"`
-	Color       string `json:"color"`
+	MailboxID int64  `json:"mailboxId"`
+	Name      string `json:"name"`
+	Color     string `json:"color"`
+	// ThreadCount and UnreadCount cover the threads ListThreads would list
+	// for the same search, so a search narrows both.
+	ThreadCount int64  `json:"threadCount"`
 	UnreadCount int64  `json:"unreadCount"`
 	IsDefault   bool   `json:"isDefault"`
 	IsShared    bool   `json:"isShared"`
@@ -157,18 +160,25 @@ type Mailbox struct {
 
 // Folder organises threads inside a mailbox.
 type Folder struct {
-	FolderID    int64  `json:"folderId"`
-	Name        string `json:"name"`
-	UnreadCount int64  `json:"unreadCount"`
-	IsDefault   bool   `json:"isDefault"`
+	FolderID int64  `json:"folderId"`
+	Name     string `json:"name"`
+	// ThreadCount and UnreadCount cover the threads ListThreads would list
+	// for the same search, so a search narrows both.
+	ThreadCount int64 `json:"threadCount"`
+	UnreadCount int64 `json:"unreadCount"`
+	IsDefault   bool  `json:"isDefault"`
 }
 
 // Thread is a conversation as one customer sees it.
 type Thread struct {
-	ThreadID        int64   `json:"threadId"`
-	Subject         string  `json:"subject"`
-	Summary         string  `json:"summary"`
-	UnreadCount     int64   `json:"unreadCount"`
+	ThreadID    int64  `json:"threadId"`
+	Subject     string `json:"subject"`
+	Summary     string `json:"summary"`
+	UnreadCount int64  `json:"unreadCount"`
+	// MessageCount is how many messages the thread holds or, when the listing
+	// is searched, how many of them match. That is the set ListMessages returns
+	// for the same search, and it is 0 when only the subject matched.
+	MessageCount    int64   `json:"messageCount"`
 	Subscribers     []Party `json:"subscribers"`
 	AttachmentCount int64   `json:"attachmentCount"`
 	UpdatedAt       string  `json:"updatedAt"`
@@ -303,7 +313,7 @@ func (s *Service) ListMailboxes(ctx context.Context, customerID int64, search st
 		return []Mailbox{}, nil
 	}
 
-	counts, err := s.mailboxCounts(ctx, customerID, ids, search)
+	threads, unread, err := s.threadCounts(ctx, customerID, `"folder"."mailbox_id"`, ids, search)
 	if err != nil {
 		return nil, err
 	}
@@ -312,40 +322,42 @@ func (s *Service) ListMailboxes(ctx context.Context, customerID int64, search st
 		return nil, err
 	}
 	for i := range mailboxes {
-		mailboxes[i].UnreadCount = counts[mailboxes[i].MailboxID]
+		mailboxes[i].ThreadCount = threads[mailboxes[i].MailboxID]
+		mailboxes[i].UnreadCount = unread[mailboxes[i].MailboxID]
 		mailboxes[i].IsDefault = mailboxes[i].MailboxID == defaultID
 	}
 	return mailboxes, nil
 }
 
-func (s *Service) mailboxCounts(ctx context.Context, customerID int64, ids []int64, search string) (map[int64]int64, error) {
-	in := store.Placeholders(len(ids))
+// threadCounts returns, per value of the group column, how many of the
+// customer's threads there are and how many of those are unread. With a search
+// it counts only the matching threads, the ones ListThreads would list. The
+// PHP backend reported the matching count as the unread count, which made a
+// searched folder look entirely unread.
+func (s *Service) threadCounts(ctx context.Context, customerID int64, group string, ids []int64, search string) (threads, unread map[int64]int64, err error) {
+	from := `FROM "thread" LEFT JOIN "folder" ON "thread"."folder_id" = "folder"."id" `
+	match, args := "TRUE", append([]any{customerID}, store.Args(ids)...)
 	if search != "" {
-		match, matchArgs := s.threadMatch(search)
-		args := append([]any{customerID}, store.Args(ids)...)
+		from += `LEFT JOIN "g_thread" ON "thread"."g_thread_id" = "g_thread"."id" ` +
+			`LEFT JOIN "g_message" ON "g_thread"."id" = "g_message"."g_thread_id" `
+		var matchArgs []any
+		match, matchArgs = s.threadMatch(search)
 		args = append(args, matchArgs...)
-		counts, err := store.SelectCounts(ctx, s.db,
-			`SELECT "mailbox_id", COUNT(DISTINCT "thread"."id") FROM "thread" `+
-				`LEFT JOIN "folder" ON "thread"."folder_id" = "folder"."id" `+
-				`LEFT JOIN "g_thread" ON "thread"."g_thread_id" = "g_thread"."id" `+
-				`LEFT JOIN "g_message" ON "g_thread"."id" = "g_message"."g_thread_id" `+
-				`WHERE "thread"."customer_id" = ? AND "mailbox_id" IN (`+in+") AND "+match+" "+
-				`GROUP BY "mailbox_id"`, args...)
-		if err != nil {
-			return nil, fmt.Errorf("count matching threads per mailbox: %w", err)
-		}
-		return counts, nil
 	}
-	args := append([]any{customerID}, store.Args(ids)...)
-	counts, err := store.SelectCounts(ctx, s.db,
-		`SELECT "mailbox_id", COUNT("thread"."id") - COUNT("read_at") FROM "thread" `+
-			`LEFT JOIN "folder" ON "thread"."folder_id" = "folder"."id" `+
-			`WHERE "thread"."customer_id" = ? AND "mailbox_id" IN (`+in+") "+
-			`GROUP BY "mailbox_id"`, args...)
+	where := `WHERE "thread"."customer_id" = ? AND "thread"."deleted_at" IS NULL AND ` +
+		group + ` IN (` + store.Placeholders(len(ids)) + `) AND ` + match + ` `
+	threads, err = store.SelectCounts(ctx, s.db,
+		`SELECT `+group+`, COUNT(DISTINCT "thread"."id") `+from+where+`GROUP BY `+group, args...)
 	if err != nil {
-		return nil, fmt.Errorf("count unread threads per mailbox: %w", err)
+		return nil, nil, fmt.Errorf("count threads: %w", err)
 	}
-	return counts, nil
+	unread, err = store.SelectCounts(ctx, s.db,
+		`SELECT `+group+`, COUNT(DISTINCT "thread"."id") `+from+where+
+			`AND "thread"."read_at" IS NULL GROUP BY `+group, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("count unread threads: %w", err)
+	}
+	return threads, unread, nil
 }
 
 // ListFolders returns the folders of a mailbox with unread counts.
@@ -375,26 +387,9 @@ func (s *Service) ListFolders(ctx context.Context, customerID, mailboxID int64, 
 		return []Folder{}, nil
 	}
 
-	in := store.Placeholders(len(ids))
-	var counts map[int64]int64
-	if search != "" {
-		match, matchArgs := s.threadMatch(search)
-		args := append([]any{customerID}, store.Args(ids)...)
-		args = append(args, matchArgs...)
-		counts, err = store.SelectCounts(ctx, s.db,
-			`SELECT "folder_id", COUNT(DISTINCT "thread"."id") FROM "thread" `+
-				`LEFT JOIN "g_thread" ON "thread"."g_thread_id" = "g_thread"."id" `+
-				`LEFT JOIN "g_message" ON "g_thread"."id" = "g_message"."g_thread_id" `+
-				`WHERE "thread"."customer_id" = ? AND "folder_id" IN (`+in+") AND "+match+" "+
-				`GROUP BY "folder_id"`, args...)
-	} else {
-		args := append([]any{customerID}, store.Args(ids)...)
-		counts, err = store.SelectCounts(ctx, s.db,
-			`SELECT "folder_id", COUNT("id") - COUNT("read_at") FROM "thread" `+
-				`WHERE "customer_id" = ? AND "folder_id" IN (`+in+`) GROUP BY "folder_id"`, args...)
-	}
+	threads, unread, err := s.threadCounts(ctx, customerID, `"thread"."folder_id"`, ids, search)
 	if err != nil {
-		return nil, fmt.Errorf("count threads per folder: %w", err)
+		return nil, err
 	}
 
 	defaultID, err := s.DefaultFolderID(ctx, customerID, mailboxID)
@@ -402,7 +397,8 @@ func (s *Service) ListFolders(ctx context.Context, customerID, mailboxID int64, 
 		return nil, err
 	}
 	for i := range folders {
-		folders[i].UnreadCount = counts[folders[i].FolderID]
+		folders[i].ThreadCount = threads[folders[i].FolderID]
+		folders[i].UnreadCount = unread[folders[i].FolderID]
 		folders[i].IsDefault = folders[i].FolderID == defaultID
 	}
 	return folders, nil
@@ -467,7 +463,11 @@ func (s *Service) ListThreads(ctx context.Context, customerID, folderID int64, s
 		return []Thread{}, nil
 	}
 
-	counts, err := s.threadMessageCounts(ctx, customerID, threadIDs, search)
+	unread, err := s.unreadCounts(ctx, customerID, threadIDs)
+	if err != nil {
+		return nil, err
+	}
+	messageCounts, err := s.messageCounts(ctx, customerID, threadIDs, search)
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +489,8 @@ func (s *Service) ListThreads(ctx context.Context, customerID, folderID int64, s
 	}
 
 	for i := range threads {
-		threads[i].UnreadCount = counts[threads[i].ThreadID]
+		threads[i].UnreadCount = unread[threads[i].ThreadID]
+		threads[i].MessageCount = messageCounts[threads[i].ThreadID]
 		threads[i].AttachmentCount = attachmentCounts[threads[i].ThreadID]
 		if subs := subscribers[gThreadByThread[threads[i].ThreadID]]; subs != nil {
 			threads[i].Subscribers = subs
@@ -498,28 +499,38 @@ func (s *Service) ListThreads(ctx context.Context, customerID, folderID int64, s
 	return threads, nil
 }
 
-func (s *Service) threadMessageCounts(ctx context.Context, customerID int64, threadIDs []int64, search string) (map[int64]int64, error) {
+// unreadCounts returns the number of unread messages of each thread.
+func (s *Service) unreadCounts(ctx context.Context, customerID int64, threadIDs []int64) (map[int64]int64, error) {
 	in := store.Placeholders(len(threadIDs))
-	if search != "" {
-		match, matchArgs := s.db.Match("g_message", store.ParseQuery(search))
-		args := append([]any{customerID}, store.Args(threadIDs)...)
-		args = append(args, matchArgs...)
-		counts, err := store.SelectCounts(ctx, s.db,
-			`SELECT "thread_id", COUNT("message"."id") FROM "message" `+
-				`LEFT JOIN "g_message" ON "g_message"."id" = "message"."g_message_id" `+
-				`WHERE "customer_id" = ? AND "thread_id" IN (`+in+") AND "+match+" "+
-				`GROUP BY "thread_id"`, args...)
-		if err != nil {
-			return nil, fmt.Errorf("count matching messages per thread: %w", err)
-		}
-		return counts, nil
-	}
 	counts, err := store.SelectCounts(ctx, s.db,
 		`SELECT "thread_id", COUNT("id") - COUNT("read_at") FROM "message" `+
 			`WHERE "customer_id" = ? AND "thread_id" IN (`+in+`) GROUP BY "thread_id"`,
 		append([]any{customerID}, store.Args(threadIDs)...)...)
 	if err != nil {
 		return nil, fmt.Errorf("count unread messages per thread: %w", err)
+	}
+	return counts, nil
+}
+
+// messageCounts returns the number of messages of each thread, counting only
+// those that match the search when there is one. The PHP backend reported the
+// matching count in place of the unread count, which made every search result
+// look unread.
+func (s *Service) messageCounts(ctx context.Context, customerID int64, threadIDs []int64, search string) (map[int64]int64, error) {
+	in := store.Placeholders(len(threadIDs))
+	match, args := "TRUE", append([]any{customerID}, store.Args(threadIDs)...)
+	if search != "" {
+		var matchArgs []any
+		match, matchArgs = s.db.Match("g_message", store.ParseQuery(search))
+		args = append(args, matchArgs...)
+	}
+	counts, err := store.SelectCounts(ctx, s.db,
+		`SELECT "thread_id", COUNT("message"."id") FROM "message" `+
+			`LEFT JOIN "g_message" ON "g_message"."id" = "message"."g_message_id" `+
+			`WHERE "customer_id" = ? AND "thread_id" IN (`+in+") AND "+match+" "+
+			`GROUP BY "thread_id"`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("count messages per thread: %w", err)
 	}
 	return counts, nil
 }

@@ -889,11 +889,20 @@ components:
           type: string
           example: "blue"
           description: Color label for the mailbox
+        threadCount:
+          type: integer
+          format: int32
+          example: 12
+          description: >-
+            Number of threads in the mailbox. When the listing is searched, the
+            number of threads that match.
         unreadCount:
           type: integer
           format: int32
           example: 2
-          description: Number of unread messages in the mailbox
+          description: >-
+            Number of unread threads in the mailbox. When the listing is searched,
+            the number of matching threads that are unread.
         isDefault:
           type: boolean
           example: true
@@ -924,11 +933,20 @@ components:
           type: string
           example: "Inbox"
           description: Display name for the folder
+        threadCount:
+          type: integer
+          format: int32
+          example: 12
+          description: >-
+            Number of threads in the folder. When the listing is searched, the
+            number of threads that match.
         unreadCount:
           type: integer
           format: int32
           example: 2
-          description: Number of unread messages in the folder
+          description: >-
+            Number of unread threads in the folder. When the listing is searched,
+            the number of matching threads that are unread.
         isDefault:
           type: boolean
           example: true
@@ -954,6 +972,14 @@ components:
           format: int32
           example: 2
           description: Number of unread messages in the thread
+        messageCount:
+          type: integer
+          format: int32
+          example: 3
+          description: >-
+            Number of messages in the thread. When the listing is searched, the
+            number of messages that match, which is 0 when only the subject
+            matched.
         subscribers:
           type: array
           items:

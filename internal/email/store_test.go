@@ -156,19 +156,32 @@ func TestThreadLifecycle(t *testing.T) {
 		if len(threads) != tc.threads {
 			t.Errorf("search %q found %d threads, want %d", tc.search, len(threads), tc.threads)
 		}
+		// A search result keeps its read state; the search narrows its
+		// message count instead.
+		for _, th := range threads {
+			if th.UnreadCount != 1 {
+				t.Errorf("search %q reports %d unread, want Bob's reply", tc.search, th.UnreadCount)
+			}
+		}
 		mailboxes, err := f.svc.ListMailboxes(f.ctx, alice, tc.search)
 		if err != nil {
 			t.Fatalf("search %q in mailboxes: %v", tc.search, err)
 		}
-		if got := mailboxes[0].UnreadCount; got != int64(tc.threads) {
+		if got := mailboxes[0].ThreadCount; got != int64(tc.threads) {
 			t.Errorf("search %q counts %d threads in the mailbox, want %d", tc.search, got, tc.threads)
+		}
+		if got := mailboxes[0].UnreadCount; got != int64(tc.threads) {
+			t.Errorf("search %q counts %d unread in the mailbox, want %d", tc.search, got, tc.threads)
 		}
 		folders, err := f.svc.ListFolders(f.ctx, alice, aliceMailbox, tc.search)
 		if err != nil {
 			t.Fatalf("search %q in folders: %v", tc.search, err)
 		}
-		if got := folders[0].UnreadCount; got != int64(tc.threads) {
+		if got := folders[0].ThreadCount; got != int64(tc.threads) {
 			t.Errorf("search %q counts %d threads in the folder, want %d", tc.search, got, tc.threads)
+		}
+		if got := folders[0].UnreadCount; got != int64(tc.threads) {
+			t.Errorf("search %q counts %d unread in the folder, want %d", tc.search, got, tc.threads)
 		}
 	}
 	found, err := f.svc.ListMessages(f.ctx, alice, threadID, "numbers")
@@ -184,6 +197,28 @@ func TestThreadLifecycle(t *testing.T) {
 	}
 	if mailboxes, _ := f.svc.ListMailboxes(f.ctx, alice, ""); mailboxes[0].UnreadCount != 0 {
 		t.Errorf("Alice has %d unread after reading", mailboxes[0].UnreadCount)
+	}
+	results, err := f.svc.ListThreads(f.ctx, alice, aliceInbox, "final")
+	if err != nil || len(results) != 1 {
+		t.Fatalf("search after reading = %d, %v", len(results), err)
+	}
+	if results[0].UnreadCount != 0 || results[0].MessageCount != 1 {
+		t.Errorf("read thread in search = %d unread of %d messages, want 0 of the 1 matching",
+			results[0].UnreadCount, results[0].MessageCount)
+	}
+	if listed, _ := f.svc.ListThreads(f.ctx, alice, aliceInbox, ""); listed[0].MessageCount != 2 {
+		t.Errorf("listing reports %d messages, want 2", listed[0].MessageCount)
+	}
+	// The read thread still matches, but no longer counts as unread.
+	if mailboxes, _ := f.svc.ListMailboxes(f.ctx, alice, "final"); mailboxes[0].ThreadCount != 1 ||
+		mailboxes[0].UnreadCount != 0 {
+		t.Errorf("mailbox in search = %d unread of %d threads, want 0 of 1",
+			mailboxes[0].UnreadCount, mailboxes[0].ThreadCount)
+	}
+	if folders, _ := f.svc.ListFolders(f.ctx, alice, aliceMailbox, "final"); folders[0].ThreadCount != 1 ||
+		folders[0].UnreadCount != 0 {
+		t.Errorf("folder in search = %d unread of %d threads, want 0 of 1",
+			folders[0].UnreadCount, folders[0].ThreadCount)
 	}
 
 	attachmentID := messages[1].Attachments[0].AttachmentID
@@ -215,6 +250,9 @@ func TestThreadLifecycle(t *testing.T) {
 	}
 	if threads, _ := f.svc.ListThreads(f.ctx, bob, bobInbox, ""); len(threads) != 0 {
 		t.Errorf("Bob still lists %d threads", len(threads))
+	}
+	if mailboxes, _ := f.svc.ListMailboxes(f.ctx, bob, ""); mailboxes[0].ThreadCount != 0 {
+		t.Errorf("Bob's mailbox still counts %d threads", mailboxes[0].ThreadCount)
 	}
 	if threads, _ := f.svc.ListThreads(f.ctx, alice, aliceInbox, ""); len(threads) != 1 {
 		t.Error("deleting Bob's copy removed Alice's")
