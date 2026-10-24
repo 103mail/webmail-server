@@ -57,6 +57,18 @@ type Chat struct {
 	// time is not that: a long-running conversation would sink below one nobody
 	// has spoken in since it was opened.
 	LastMessageAt string `json:"lastMessageAt"`
+	// LastMessage previews the newest message this customer received, or is
+	// nil for a chat with none.
+	LastMessage *MessagePreview `json:"lastMessage"`
+}
+
+// MessagePreview is the newest message of a chat, as a chat list shows it.
+type MessagePreview struct {
+	SenderEmail     string `json:"senderEmail"`
+	SenderName      string `json:"senderName"`
+	Body            string `json:"body"`
+	CreatedAt       string `json:"createdAt"`
+	AttachmentCount int64  `json:"attachmentCount"`
 }
 
 // Participant is a chat member with presence and membership dates.
@@ -222,13 +234,58 @@ func (s *Service) ListChats(ctx context.Context, customerID, mailboxID int64, se
 	if err != nil {
 		return nil, err
 	}
+	previews, err := s.lastMessages(ctx, customerID, chatIDs)
+	if err != nil {
+		return nil, err
+	}
 	for i := range chats {
 		chats[i].UnreadCount = unread[chats[i].ChatID]
+		chats[i].LastMessage = previews[chats[i].ChatID]
 		if p := participants[gChatByChat[chats[i].ChatID]]; p != nil {
 			chats[i].Participants = p
 		}
 	}
 	return chats, nil
+}
+
+// lastMessages returns the newest message of each chat, by chat id. It reads
+// through the customer's own projections, so it never previews a message the
+// customer did not receive, such as one sent before they joined.
+func (s *Service) lastMessages(ctx context.Context, customerID int64, chatIDs []int64) (map[int64]*MessagePreview, error) {
+	in := store.Placeholders(len(chatIDs))
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT "chat_message"."chat_id", "g_chat_message"."sender_email", "g_chat_message"."sender_name", `+
+			`"g_chat_message"."body", "g_chat_message"."created_at", `+
+			`(SELECT COUNT(*) FROM "g_chat_attachment" `+
+			`WHERE "g_chat_attachment"."g_chat_message_id" = "g_chat_message"."id") FROM "chat_message" `+
+			`JOIN "g_chat_message" ON "chat_message"."g_chat_message_id" = "g_chat_message"."id" `+
+			`WHERE "chat_message"."id" IN (SELECT MAX("chat_message"."id") FROM "chat_message" `+
+			`JOIN "g_chat_message" ON "chat_message"."g_chat_message_id" = "g_chat_message"."id" `+
+			`WHERE "chat_message"."customer_id" = ? AND "chat_message"."chat_id" IN (`+in+`) `+
+			`AND "g_chat_message"."deleted_at" IS NULL GROUP BY "chat_message"."chat_id")`,
+		append([]any{customerID}, store.Args(chatIDs)...)...)
+	if err != nil {
+		return nil, fmt.Errorf("list last chat messages: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[int64]*MessagePreview{}
+	for rows.Next() {
+		var chatID int64
+		var p MessagePreview
+		var senderName sql.NullString
+		var createdAt store.NullTime
+		if err := rows.Scan(&chatID, &p.SenderEmail, &senderName, &p.Body, &createdAt,
+			&p.AttachmentCount); err != nil {
+			return nil, fmt.Errorf("scan last chat message: %w", err)
+		}
+		p.SenderName = senderName.String
+		if createdAt.Valid {
+			p.CreatedAt = rfc3339(createdAt.Time)
+		}
+		out[chatID] = &p
+	}
+	return out, rows.Err()
 }
 
 func (s *Service) participantsByChat(ctx context.Context, customerID int64, gChatIDs []int64) (map[int64][]ParticipantRef, error) {

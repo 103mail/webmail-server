@@ -716,6 +716,34 @@ components:
           format: date-time
           example: "2025-11-01T10:00:00Z"
           description: Date and time the chat was created
+        lastMessageAt:
+          type: string
+          example: "2025-11-02T09:30:00+00:00"
+          description: Date and time the newest message was sent, or empty for a chat with none
+        lastMessage:
+          type: [object, "null"]
+          description: >-
+            The newest message the caller received in the chat, for a chat list
+            preview, or null for a chat with none
+          properties:
+            senderEmail:
+              type: string
+              format: email
+              example: "joost@103mail.com"
+            senderName:
+              type: string
+              example: "Joost van der Schee"
+            body:
+              type: string
+              example: "See you at ten"
+            createdAt:
+              type: string
+              format: date-time
+              example: "2025-11-02T09:30:00+00:00"
+            attachmentCount:
+              type: integer
+              format: int32
+              example: 0
     Participant:
       type: object
       properties:

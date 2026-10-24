@@ -111,6 +111,16 @@ func TestChatLifecycle(t *testing.T) {
 	if len(chats[0].Participants) != 2 {
 		t.Errorf("participants %+v", chats[0].Participants)
 	}
+	// The listing previews the newest message, so a chat list need not open
+	// every chat to show what was said last.
+	if p := chats[0].LastMessage; p == nil || p.Body != "Kickoff agenda attached" ||
+		p.SenderEmail != "alice@example.test" || p.AttachmentCount != 1 ||
+		p.CreatedAt != "2026-10-20T09:01:00+00:00" {
+		t.Errorf("last message %+v", chats[0].LastMessage)
+	}
+	if chats[1].LastMessage != nil {
+		t.Errorf("a chat without messages previews %+v", chats[1].LastMessage)
+	}
 	bobChats, err := f.svc.ListChats(f.ctx, bob.customerID, bob.mailboxID, "")
 	if err != nil || len(bobChats) != 1 || bobChats[0].UnreadCount != 1 {
 		t.Fatalf("Bob's chats = %+v, %v", bobChats, err)
