@@ -120,6 +120,22 @@ func (s *Service) isLocal(address string) bool {
 	return s.federation.IsLocal(federation.DomainOf(address))
 }
 
+// deliversHere reports whether mail for an address stays on this Server: it is
+// on a hosted Domain, or it is an alias of a mailbox here whatever its domain.
+// The local match comes first, before any peer is asked (design 15.5), which
+// is what keeps aliases carried over from the PHP backend, such as an address
+// at a personal domain, delivering to the mailbox that has them.
+func (s *Service) deliversHere(ctx context.Context, q store.Queryer, address string) (bool, error) {
+	if s.isLocal(address) {
+		return true, nil
+	}
+	n, err := store.SelectInt(ctx, q, `SELECT COUNT(*) FROM "alias" WHERE "email" = ?`, address)
+	if err != nil {
+		return false, fmt.Errorf("look up alias %s: %w", address, err)
+	}
+	return n > 0, nil
+}
+
 // Party is an email address with the display name the viewing customer knows
 // it by, which may be empty.
 type Party struct {

@@ -117,7 +117,7 @@ func (s *Service) AddMessage(ctx context.Context, customerID, threadID int64,
 		if err != nil {
 			return fmt.Errorf("look up folder: %w", err)
 		}
-		sender, err = senderIdentity(ctx, tx, customerID, mailboxID)
+		sender, err = replyIdentity(ctx, tx, customerID, mailboxID, gThreadID)
 		if err != nil {
 			return err
 		}
@@ -235,6 +235,30 @@ func senderIdentity(ctx context.Context, q store.Queryer, customerID, mailboxID 
 	return id, nil
 }
 
+// replyIdentity returns the alias a mailbox replies to a thread as: the
+// default alias when it is a member, otherwise the mailbox's alias that is.
+// Someone written to at another of their aliases answers from that one, as
+// the thread knows them by it. With no alias on the thread it is the default,
+// which deliver then refuses.
+func replyIdentity(ctx context.Context, q store.Queryer, customerID, mailboxID, gThreadID int64) (identity, error) {
+	var id identity
+	err := q.QueryRowContext(ctx,
+		`SELECT "alias"."email", "alias"."name" FROM "alias" `+
+			`JOIN "mailbox" ON "mailbox"."id" = "alias"."mailbox_id" `+
+			`JOIN "g_subscription" ON "g_subscription"."email" = "alias"."email" `+
+			`AND "g_subscription"."g_thread_id" = ? AND `+isMember+` `+
+			`WHERE "alias"."customer_id" = ? AND "alias"."mailbox_id" = ? `+
+			`ORDER BY CASE WHEN "alias"."id" = "mailbox"."default_alias_id" THEN 0 ELSE 1 END, "alias"."id" LIMIT 1`,
+		gThreadID, customerID, mailboxID).Scan(&id.Email, &id.Name)
+	if err == sql.ErrNoRows {
+		return senderIdentity(ctx, q, customerID, mailboxID)
+	}
+	if err != nil {
+		return identity{}, fmt.Errorf("look up reply alias: %w", err)
+	}
+	return id, nil
+}
+
 // deliver writes the canonical message and fans out a projection to every
 // subscriber. It returns the sender's own message projection id.
 //
@@ -293,7 +317,11 @@ func (s *Service) deliver(ctx context.Context, tx *sql.Tx, senderCustomerID, gTh
 	var messageID int64
 	deliveredTo := map[int64]bool{}
 	for _, email := range subscribers {
-		if email != sender.Email && !s.isLocal(email) {
+		here, err := s.deliversHere(ctx, tx, email)
+		if err != nil {
+			return 0, err
+		}
+		if email != sender.Email && !here {
 			domain := federation.DomainOf(email)
 			remote[domain] = append(remote[domain], email)
 			// The sender still sees them as a contact, so autocomplete works,

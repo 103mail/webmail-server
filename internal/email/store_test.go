@@ -1091,6 +1091,42 @@ func TestRemoteRecipientsAreQueued(t *testing.T) {
 	}
 }
 
+// An address with an alias here is delivered here, even on a domain this
+// Server does not host: the local match comes before any peer (design 15.5).
+// The reply goes out as that alias, since it is the one on the thread.
+func TestAnAliasHereIsDeliveredHere(t *testing.T) {
+	f := federatedFixture(t)
+	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
+	maurits, mauritsMailbox, _ := f.account("maurits@example.test", "Maurits")
+	f.exec(`INSERT INTO "alias" ("customer_id", "email", "name", "mailbox_id") VALUES (?,?,?,?)`,
+		maurits, "maurits@vdschee.test", "Maurits", mauritsMailbox)
+
+	if _, err := f.svc.AddThread(f.ctx, alice, aliceInbox, []string{"Maurits@vdschee.test"},
+		"Hello", "<p>ddd</p>", nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "federation_outbox"`); n != 0 {
+		t.Errorf("%d envelopes queued for an address that lives here", n)
+	}
+	threadID := f.count(`SELECT "id" FROM "thread" WHERE "customer_id" = ?`, maurits)
+	if threadID == 0 {
+		t.Fatal("Maurits has no copy of the thread")
+	}
+
+	if _, err := f.svc.AddMessage(f.ctx, maurits, threadID, "<p>got it</p>", nil); err != nil {
+		t.Fatalf("Maurits could not reply: %v", err)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "g_message" WHERE "sender_email" = ?`, "maurits@vdschee.test"); n != 1 {
+		t.Errorf("%d replies sent as the alias on the thread, want 1", n)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "message" WHERE "customer_id" = ?`, alice); n != 2 {
+		t.Errorf("Alice has %d messages, want both", n)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "federation_outbox"`); n != 0 {
+		t.Errorf("%d envelopes queued for the reply", n)
+	}
+}
+
 // A bounce for a message that timed out tells the sender it will be sent
 // again when the Domain is back (RFC 6.5).
 func TestATimedOutBounceSaysItWillBeResent(t *testing.T) {

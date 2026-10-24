@@ -63,6 +63,18 @@ queued for their Domain, and **no local account**: creating one would hand them
 an address here that is not theirs. They become a `contact` row so autocomplete
 still works.
 
+A subscriber is local when their address is on a hosted Domain, or when it is
+already an alias of a mailbox here, whatever its domain. The local match comes
+first, as in the registrar lookup (design 15.5), whose peers may well live on
+other Servers. Mailboxes carried over from the PHP backend have such aliases,
+for example `maurits@vdschee.nl`. Routing those by domain alone sent their
+mail to a `webmail.vdschee.nl` that does not exist, where it waited out the
+retry budget and bounced. A reply goes out as the mailbox's alias that is on
+the thread, the default one first, since another alias would not be a member.
+This is a step toward the Registrar tier, not the tier itself. Peers still
+route such an address by its domain, so mail to it from another Domain does
+not arrive here until real-email lookup exists.
+
 `g_thread`, `g_message` and `g_attachment` are still written once, locally, so
 the sender keeps their Sent copy. Only the per-recipient projection is replaced
 by a network hop. A federated message is not a second class of message; the one

@@ -254,7 +254,11 @@ func (s *Service) tellRefusal(ctx context.Context, tx *sql.Tx, gThreadID int64, 
 		if federation.IsMailerDaemon(member) {
 			continue
 		}
-		if s.isLocal(member) {
+		here, err := s.deliversHere(ctx, tx, member)
+		if err != nil {
+			return err
+		}
+		if here {
 			if _, err := s.projectInbound(ctx, tx, gThreadID, gMessageID, nil, member, sender); err != nil {
 				return err
 			}
