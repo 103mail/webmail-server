@@ -156,7 +156,16 @@ func run(log *slog.Logger) error {
 	mail := email.New(db, attachments, notifier, federator, log)
 	fed.Attach(mail)
 
+	// Chat crosses Domains the same way: it enqueues through the federation
+	// service and receives through an interface that package declares (RFC 14).
 	chats := chat.New(db, attachments)
+	bridge := wsbridge.New(chats, log)
+	if fed.Enabled() {
+		chats.Federate(fed)
+		fed.AttachChat(chats)
+		// A message from another Domain is pushed like one written here.
+		chats.OnReceived(bridge.PushReceived)
+	}
 
 	server := api.New(cfg, log,
 		auth.New(db),
@@ -167,7 +176,7 @@ func run(log *slog.Logger) error {
 		// The chat WebSocket bridge. Connections terminate in ws2api, so this
 		// holds none of them; it answers the proxy's HTTP calls and pushes
 		// back through it. See ADR 13 and ADR 18.
-		wsbridge.New(chats, log),
+		bridge,
 	)
 
 	httpServer := &http.Server{

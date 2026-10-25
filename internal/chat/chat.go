@@ -11,9 +11,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/103mail/webmail-server/internal/blob"
+	"github.com/103mail/webmail-server/internal/federation"
 	"github.com/103mail/webmail-server/internal/store"
 )
 
@@ -28,6 +30,33 @@ const TypingTTL = 3 * time.Second
 type Service struct {
 	db   *store.DB
 	blob *blob.Store
+	// fed is nil when no Domain federates, and every chat stays on this
+	// Server, as it did before chat crossed Domains (RFC 14).
+	fed Federator
+	// received, when set, is told of each new message from another Domain,
+	// so the open connections of its recipients see it at once.
+	received func(ctx context.Context, gChatID, gMessageID int64)
+}
+
+// OnReceived sets what is told of each new message from another Domain once
+// it is stored. The WebSocket bridge pushes it on.
+func (s *Service) OnReceived(fn func(ctx context.Context, gChatID, gMessageID int64)) {
+	s.received = fn
+}
+
+// MessageByCanonical returns one message of a chat as the customer sees it,
+// by its canonical id, or nil if they have no copy of it.
+func (s *Service) MessageByCanonical(ctx context.Context, customerID, chatID, gMessageID int64) (*Message, error) {
+	messages, err := s.ListMessages(ctx, customerID, chatID, "")
+	if err != nil {
+		return nil, err
+	}
+	for i := range messages {
+		if messages[i].gID == gMessageID {
+			return &messages[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // New returns a Service. attachments is the directory holding attachment bytes.
@@ -113,6 +142,10 @@ type Message struct {
 	ReadAt         *string         `json:"readAt"`
 	Attachments    []AttachmentRef `json:"attachments"`
 	DeliveryStatus *DeliveryStatus `json:"deliveryStatus"`
+
+	sentAt time.Time
+	fedID  string
+	gID    int64
 }
 
 // AttachmentData is a chat attachment with its bytes.
@@ -562,9 +595,59 @@ func (s *Service) AddParticipant(ctx context.Context, customerID, chatID int64, 
 		if err := projectChat(ctx, tx, gChatID, email); err != nil {
 			return err
 		}
-		return projectHistory(ctx, tx, gChatID, email, s.db.Now())
+		if err := projectHistory(ctx, tx, gChatID, email, s.db.Now()); err != nil {
+			return err
+		}
+		return s.announceJoin(ctx, tx, customerID, chatID, gChatID, email)
 	})
 	return participantID, err
+}
+
+// announceJoin tells a chat with members elsewhere that someone was added,
+// with a message from whoever added them. That message is how every other
+// Domain learns of it, and what brings the newcomer the history (RFC 14.5).
+// A chat that stays on this Server says nothing, as before.
+func (s *Service) announceJoin(ctx context.Context, tx *sql.Tx, customerID, chatID, gChatID int64, added string) error {
+	if s.fed == nil {
+		return nil
+	}
+	members, err := activeParticipants(ctx, tx, gChatID)
+	if err != nil || !s.hasRemote(members) {
+		return err
+	}
+	adder, adderName, err := chatAlias(ctx, tx, customerID, chatID)
+	if err != nil {
+		return err
+	}
+	if !contains(members, adder) {
+		return &NotMemberError{Address: adder}
+	}
+	_, _, err = s.writeMessage(ctx, tx, outgoing{
+		gChatID: gChatID, sender: adder, senderName: adderName,
+		body: displayName(adderName, adder) + " added " + added, added: []string{added},
+	})
+	return err
+}
+
+// chatAlias is the address and name a customer speaks as in one of their
+// chats: the alias of the mailbox the chat is in.
+func chatAlias(ctx context.Context, tx *sql.Tx, customerID, chatID int64) (string, string, error) {
+	var email, name string
+	err := tx.QueryRowContext(ctx,
+		`SELECT "alias"."email", "alias"."name" FROM "chat" `+
+			`JOIN "alias" ON "alias"."customer_id" = "chat"."customer_id" AND "alias"."mailbox_id" = "chat"."mailbox_id" `+
+			`WHERE "chat"."customer_id" = ? AND "chat"."id" = ? LIMIT 1`, customerID, chatID).Scan(&email, &name)
+	if err != nil {
+		return "", "", fmt.Errorf("look up chat alias: %w", err)
+	}
+	return email, name, nil
+}
+
+func displayName(name, email string) string {
+	if name != "" {
+		return name
+	}
+	return email
 }
 
 // projectHistory gives someone who joined a chat every message written in it
@@ -602,16 +685,53 @@ func projectHistory(ctx context.Context, tx *sql.Tx, gChatID int64, email string
 }
 
 // RemoveParticipant marks a member as having left. Their history stays.
+//
+// In a chat with members elsewhere, leaving is said by the leaver's own
+// Domain, with a message from them to everyone else, so only this Server's
+// own people can be removed here (RFC 5.6, 14.5).
 func (s *Service) RemoveParticipant(ctx context.Context, customerID, participantID int64) (bool, error) {
-	// The participant must be in a chat the caller can see.
-	n, err := store.Affected(ctx, s.db,
-		`UPDATE "g_chat_participant" SET "left_at" = ? WHERE "id" = ? AND "left_at" IS NULL `+
-			`AND "g_chat_id" IN (SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ?)`,
-		s.db.Now(), participantID, customerID)
-	if err != nil {
-		return false, fmt.Errorf("remove participant: %w", err)
-	}
-	return n > 0, nil
+	removed := false
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		// The participant must be in a chat the caller can see.
+		var gChatID int64
+		var email string
+		err := tx.QueryRowContext(ctx,
+			`SELECT "g_chat_id", "email" FROM "g_chat_participant" WHERE "id" = ? AND "left_at" IS NULL `+
+				`AND "g_chat_id" IN (SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ?) LIMIT 1`,
+			participantID, customerID).Scan(&gChatID, &email)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("look up participant: %w", err)
+		}
+		if s.remote(email) {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE "g_chat_participant" SET "left_at" = ? WHERE "id" = ?`, s.db.Now(), participantID); err != nil {
+			return fmt.Errorf("remove participant: %w", err)
+		}
+		removed = true
+		if s.fed == nil {
+			return nil
+		}
+		remaining, err := activeParticipants(ctx, tx, gChatID)
+		if err != nil || !s.hasRemote(remaining) {
+			return err
+		}
+		name, err := store.SelectString(ctx, tx,
+			`SELECT "name" FROM "alias" WHERE "email" = ? LIMIT 1`, email)
+		if err != nil {
+			return fmt.Errorf("look up leaver: %w", err)
+		}
+		_, _, err = s.writeMessage(ctx, tx, outgoing{
+			gChatID: gChatID, sender: email, senderName: name,
+			body: displayName(name, email) + " left the chat", left: []string{email},
+		})
+		return err
+	})
+	return removed, err
 }
 
 // ListMessages returns a chat's messages, newest first.
@@ -626,7 +746,8 @@ func (s *Service) ListMessages(ctx context.Context, customerID, chatID int64, se
 		`SELECT "chat_message"."id", "chat_message"."delivered_at", "chat_message"."read_at", `+
 			`"g_chat_message"."id", "g_chat_message"."sender_email", "g_chat_message"."sender_name", `+
 			`"g_chat_message"."body", "g_chat_message"."body_html", "g_chat_message"."created_at", `+
-			`"g_chat_message"."edited_at", "g_chat_message"."deleted_at" FROM "chat_message" `+
+			`"g_chat_message"."edited_at", "g_chat_message"."deleted_at", "g_chat_message"."federation_id" `+
+			`FROM "chat_message" `+
 			`LEFT JOIN "g_chat_message" ON "chat_message"."g_chat_message_id" = "g_chat_message"."id" `+
 			`WHERE "chat_message"."customer_id" = ? AND "chat_message"."chat_id" = ? `+
 			`AND "g_chat_message"."deleted_at" IS NULL AND `+match+` ORDER BY "chat_message"."id" DESC`,
@@ -645,14 +766,18 @@ func (s *Service) ListMessages(ctx context.Context, customerID, chatID int64, se
 		var bodyHTML sql.NullString
 		var createdAt sql.NullTime
 		var editedAt, deletedAt, deliveredAt, readAt sql.NullTime
+		var fedID sql.NullString
 		if err := rows.Scan(&m.MessageID, &deliveredAt, &readAt, &gMessageID, &m.SenderEmail,
-			&m.SenderName, &m.Body, &bodyHTML, &createdAt, &editedAt, &deletedAt); err != nil {
+			&m.SenderName, &m.Body, &bodyHTML, &createdAt, &editedAt, &deletedAt, &fedID); err != nil {
 			return nil, fmt.Errorf("scan chat message: %w", err)
 		}
 		m.BodyHTML = bodyHTML.String
 		if createdAt.Valid {
 			m.CreatedAt = rfc3339(createdAt.Time)
+			m.sentAt = createdAt.Time
 		}
+		m.fedID = fedID.String
+		m.gID = gMessageID
 		m.EditedAt = rfc3339Ptr(editedAt)
 		m.DeletedAt = rfc3339Ptr(deletedAt)
 		m.DeliveredAt = rfc3339Ptr(deliveredAt)
@@ -668,6 +793,16 @@ func (s *Service) ListMessages(ctx context.Context, customerID, chatID int64, se
 	if len(messages) == 0 {
 		return []Message{}, nil
 	}
+	// One order on every Domain, however the messages arrived: by send time
+	// in whole seconds, then by federation id (RFC 5.5, 14.4). A message
+	// without an id, from before chat federated, keeps its place by arrival.
+	sort.SliceStable(messages, func(i, j int) bool {
+		a, b := messages[i], messages[j]
+		if a.fedID == "" || b.fedID == "" {
+			return a.MessageID > b.MessageID
+		}
+		return before(b.sentAt, b.fedID, a.sentAt, a.fedID)
+	})
 
 	gChatID, err := store.SelectInt(ctx, s.db,
 		`SELECT "g_chat_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`, customerID, chatID)
@@ -755,7 +890,35 @@ func (s *Service) deliveryStatuses(ctx context.Context, gMessageIDs []int64) (ma
 		}
 		out[gMessageID] = st
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Members on other Domains have no copy here. Their Domain's 202 and its
+	// receipts are recorded against their address instead (RFC 14.7).
+	remote, err := s.db.QueryContext(ctx,
+		`SELECT "g_chat_message_id", COUNT(*), `+
+			`COUNT(CASE WHEN "status" IN ('delivered', 'read') THEN 1 END), `+
+			`COUNT(CASE WHEN "status" = 'read' THEN 1 END) `+
+			`FROM "message_status" WHERE "g_chat_message_id" IN (`+in+`) `+
+			`AND NOT EXISTS (SELECT 1 FROM "alias" WHERE "alias"."email" = "message_status"."recipient_email") `+
+			`GROUP BY "g_chat_message_id"`,
+		store.Args(gMessageIDs)...)
+	if err != nil {
+		return nil, fmt.Errorf("count remote delivery status: %w", err)
+	}
+	defer remote.Close()
+	for remote.Next() {
+		var gMessageID int64
+		var st DeliveryStatus
+		if err := remote.Scan(&gMessageID, &st.Sent, &st.Delivered, &st.Read); err != nil {
+			return nil, fmt.Errorf("scan remote delivery status: %w", err)
+		}
+		local := out[gMessageID]
+		out[gMessageID] = DeliveryStatus{
+			Sent: local.Sent + st.Sent, Delivered: local.Delivered + st.Delivered, Read: local.Read + st.Read,
+		}
+	}
+	return out, remote.Err()
 }
 
 // NotMemberError refuses a message from someone who is not in the chat, for
@@ -784,7 +947,6 @@ func (s *Service) AddMessage(ctx context.Context, customerID, chatID int64,
 // longer in.
 func (s *Service) addMessage(ctx context.Context, tx *sql.Tx, customerID, chatID int64,
 	body, bodyHTML string, attachments []NewAttachment) (int64, error) {
-	var messageID int64
 	var gChatID, mailboxID int64
 	err := tx.QueryRowContext(ctx,
 		`SELECT "g_chat_id", "mailbox_id" FROM "chat" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
@@ -806,33 +968,71 @@ func (s *Service) addMessage(ctx context.Context, tx *sql.Tx, customerID, chatID
 		return 0, fmt.Errorf("look up sender alias: %w", err)
 	}
 
-	participants, err := store.SelectStrings(ctx, tx,
-		`SELECT "email" FROM "g_chat_participant" WHERE "g_chat_id" = ? AND "left_at" IS NULL`, gChatID)
+	participants, err := activeParticipants(ctx, tx, gChatID)
 	if err != nil {
-		return 0, fmt.Errorf("list participants: %w", err)
+		return 0, err
 	}
 	if !contains(participants, senderEmail) {
 		return 0, &NotMemberError{Address: senderEmail}
 	}
+	_, messageID, err := s.writeMessage(ctx, tx, outgoing{
+		gChatID: gChatID, sender: senderEmail, senderName: senderName,
+		body: body, bodyHTML: bodyHTML, attachments: attachments,
+	})
+	return messageID, err
+}
 
+// outgoing is a message written here, by one of this Server's people.
+type outgoing struct {
+	gChatID            int64
+	sender, senderName string
+	body, bodyHTML     string
+	attachments        []NewAttachment
+	// left is the sender, when the message says they left; they are no
+	// longer a participant and get no copy (RFC 14.5).
+	left []string
+	// added are the members this message adds, who get the history.
+	added []string
+}
+
+// activeParticipants lists who is in a chat now.
+func activeParticipants(ctx context.Context, tx *sql.Tx, gChatID int64) ([]string, error) {
+	participants, err := store.SelectStrings(ctx, tx,
+		`SELECT "email" FROM "g_chat_participant" WHERE "g_chat_id" = ? AND "left_at" IS NULL ORDER BY "id"`,
+		gChatID)
+	if err != nil {
+		return nil, fmt.Errorf("list participants: %w", err)
+	}
+	return participants, nil
+}
+
+// writeMessage stores a message, gives every participant here a copy, and
+// queues it for the participants elsewhere. It returns the canonical id and
+// the sender's own copy, which is 0 for a sender who just left.
+func (s *Service) writeMessage(ctx context.Context, tx *sql.Tx, m outgoing) (int64, int64, error) {
+	var messageID int64
+	participants, err := activeParticipants(ctx, tx, m.gChatID)
+	if err != nil {
+		return 0, 0, err
+	}
+	gChatID, senderEmail := m.gChatID, m.sender
+	// The id is chosen with the send time and never changes, so the message
+	// has one place in the chat on every Domain (RFC 5.5, 14.4).
+	fedID, err := federation.NewUUID()
+	if err != nil {
+		return 0, 0, err
+	}
 	now := s.db.Now()
 	gMessageID, err := store.Insert(ctx, tx,
 		`INSERT INTO "g_chat_message" ("g_chat_id", "sender_email", "sender_name", "body", "body_html", `+
-			`"created_at") VALUES (?,?,?,?,?,?)`,
-		gChatID, senderEmail, senderName, body, nullable(bodyHTML), now)
+			`"created_at", "federation_id") VALUES (?,?,?,?,?,?,?)`,
+		gChatID, senderEmail, m.senderName, m.body, nullable(m.bodyHTML), now, fedID)
 	if err != nil {
-		return 0, fmt.Errorf("create chat message: %w", err)
+		return 0, 0, fmt.Errorf("create chat message: %w", err)
 	}
-	for _, a := range attachments {
-		hash, err := s.blob.Put(a.FileData)
-		if err != nil {
-			return 0, err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO "g_chat_attachment" ("g_chat_message_id", "file_name", "mime_type", `+
-				`"file_size", "hash_md5") VALUES (?,?,?,?,?)`,
-			gMessageID, a.FileName, a.MimeType, len(a.FileData), hash); err != nil {
-			return 0, fmt.Errorf("create chat attachment: %w", err)
+	for _, a := range m.attachments {
+		if err := s.storeAttachment(ctx, tx, gMessageID, a); err != nil {
+			return 0, 0, err
 		}
 	}
 
@@ -844,13 +1044,13 @@ func (s *Service) addMessage(ctx context.Context, tx *sql.Tx, customerID, chatID
 			continue
 		}
 		if err != nil {
-			return 0, fmt.Errorf("look up participant customer: %w", err)
+			return 0, 0, fmt.Errorf("look up participant customer: %w", err)
 		}
 		participantChatID, err := store.SelectInt(ctx, tx,
 			`SELECT "id" FROM "chat" WHERE "customer_id" = ? AND "g_chat_id" = ? LIMIT 1`,
 			participantCustomerID, gChatID)
 		if err != nil {
-			return 0, fmt.Errorf("look up participant chat: %w", err)
+			return 0, 0, fmt.Errorf("look up participant chat: %w", err)
 		}
 		if participantChatID == 0 {
 			continue
@@ -860,35 +1060,53 @@ func (s *Service) addMessage(ctx context.Context, tx *sql.Tx, customerID, chatID
 				"VALUES (?,?,?,?)",
 			participantCustomerID, participantChatID, gMessageID, now)
 		if err != nil {
-			return 0, fmt.Errorf("create chat message projection: %w", err)
+			return 0, 0, fmt.Errorf("create chat message projection: %w", err)
 		}
 		// Deleting a chat only hides it until someone writes in it again.
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE "chat" SET "deleted_at" = NULL WHERE "id" = ? AND "deleted_at" IS NOT NULL`,
 			participantChatID); err != nil {
-			return 0, fmt.Errorf("restore deleted chat: %w", err)
+			return 0, 0, fmt.Errorf("restore deleted chat: %w", err)
 		}
 		status := "delivered"
 		if email == senderEmail {
 			status = "read"
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE "chat_message" SET "read_at" = ? WHERE "id" = ?`, now, projectionID); err != nil {
-				return 0, fmt.Errorf("mark own message read: %w", err)
+				return 0, 0, fmt.Errorf("mark own message read: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE "chat" SET "last_read_message_id" = ? WHERE "id" = ?`,
 				gMessageID, participantChatID); err != nil {
-				return 0, fmt.Errorf("advance read marker: %w", err)
+				return 0, 0, fmt.Errorf("advance read marker: %w", err)
 			}
 			messageID = projectionID
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO "message_status" ("g_chat_message_id", "recipient_email", "status", "timestamp") `+
 				"VALUES (?,?,?,?)", gMessageID, email, status, now); err != nil {
-			return 0, fmt.Errorf("record message status: %w", err)
+			return 0, 0, fmt.Errorf("record message status: %w", err)
 		}
 	}
-	return messageID, nil
+	if err := s.federateMessage(ctx, tx, gMessageID, fedID, now, m, participants); err != nil {
+		return 0, 0, err
+	}
+	return gMessageID, messageID, nil
+}
+
+// storeAttachment writes an attachment's bytes and its canonical row.
+func (s *Service) storeAttachment(ctx context.Context, tx *sql.Tx, gMessageID int64, a NewAttachment) error {
+	hash, err := s.blob.Put(a.FileData)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO "g_chat_attachment" ("g_chat_message_id", "file_name", "mime_type", `+
+			`"file_size", "hash_md5") VALUES (?,?,?,?,?)`,
+		gMessageID, a.FileName, a.MimeType, len(a.FileData), hash); err != nil {
+		return fmt.Errorf("create chat attachment: %w", err)
+	}
+	return nil
 }
 
 func nullable(s string) any {
@@ -957,6 +1175,19 @@ func (s *Service) editableMessage(ctx context.Context, customerID, messageID int
 	}
 	if owns == 0 {
 		return 0, nil
+	}
+	// A change cannot be carried to another Domain, so a message in a chat
+	// with members elsewhere stays as it was sent (RFC 14.6).
+	if s.fed != nil {
+		members, err := store.SelectStrings(ctx, s.db,
+			`SELECT "email" FROM "g_chat_participant" WHERE "g_chat_id" = `+
+				`(SELECT "g_chat_id" FROM "g_chat_message" WHERE "id" = ?)`, gMessageID)
+		if err != nil {
+			return 0, fmt.Errorf("list chat members: %w", err)
+		}
+		if s.hasRemote(members) {
+			return 0, nil
+		}
 	}
 	return gMessageID, nil
 }

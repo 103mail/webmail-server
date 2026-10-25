@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/103mail/webmail-server/internal/blob"
+	"github.com/103mail/webmail-server/internal/chat"
 	"github.com/103mail/webmail-server/internal/config"
 	"github.com/103mail/webmail-server/internal/email"
 	"github.com/103mail/webmail-server/internal/federation"
@@ -34,6 +35,9 @@ import (
 
 const (
 	defaultInterval = 5 * time.Second
+	// chatInterval is how often the chat loop drains, which is how long a
+	// chat message waits at most before it goes out (RFC 14.4).
+	chatInterval = time.Second
 	// batch is how many envelopes are claimed per peer per pass. Small, because
 	// a pass holds no locks across the network and a short cycle keeps a
 	// recovering peer's queue moving without a thundering herd.
@@ -95,6 +99,9 @@ func run(log *slog.Logger) error {
 	attachments := blob.New(filepath.Join(cfg.DataDir, "attachments"))
 	mail := email.New(db, attachments, notify.New(db, nil), fed, log)
 	fed.Attach(mail)
+	// And the chat domain, to record what peers accepted and to tell a sender
+	// in the chat when a message did not arrive.
+	fed.AttachChat(chat.New(db, attachments))
 
 	interval := defaultInterval
 	if v := os.Getenv("WEBMAIL_WORKER_INTERVAL_SECONDS"); v != "" {
@@ -116,6 +123,10 @@ func run(log *slog.Logger) error {
 	sweep := time.NewTicker(sweepEvery)
 	defer sweep.Stop()
 
+	// Chat has a loop of its own, so a mail pass stuck on a slow peer never
+	// holds a chat message up (RFC 14.4).
+	go chatLoop(ctx, fed, log)
+
 	// One pass immediately, so a restart does not wait a full interval before
 	// picking up whatever is due.
 	drainOnce(ctx, fed, log)
@@ -130,6 +141,29 @@ func run(log *slog.Logger) error {
 		case <-sweep.C:
 			if err := fed.Sweep(ctx); err != nil && ctx.Err() == nil {
 				log.Error("sweep failed", "error", err)
+			}
+		}
+	}
+}
+
+// chatLoop drains the chat envelopes and read receipts every second until the
+// worker stops.
+func chatLoop(ctx context.Context, fed *federation.Service, log *slog.Logger) {
+	tick := time.NewTicker(chatInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			pass, cancel := context.WithTimeout(ctx, time.Minute)
+			handled, err := fed.DrainChat(pass, batch)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				log.Error("chat drain failed", "error", err)
+			}
+			if handled > 0 {
+				log.Info("drained the chat outbox", "envelopes", handled)
 			}
 		}
 	}

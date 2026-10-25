@@ -22,6 +22,9 @@ type Descriptor struct {
 	Registrar          bool     `json:"registrar"`
 	MaxEnvelopeBytes   int64    `json:"max_envelope_bytes"`
 	MaxAttachmentBytes int64    `json:"max_attachment_bytes"`
+	// Chat is whether the Domain implements the chat extension. A Domain
+	// that does also lists version 0.3, which is what is pinned (RFC 14.1).
+	Chat bool `json:"chat,omitempty"`
 }
 
 // Defaults a descriptor takes when it does not state them (RFC 4.2).

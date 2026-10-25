@@ -60,35 +60,35 @@ func TestOutboxLeases(t *testing.T) {
 	second := newStoreService(t, db)
 	enqueue(t, first, "peer.test", 3)
 
-	peers, err := first.duePeers(ctx)
+	peers, err := first.duePeers(ctx, false)
 	if err != nil || len(peers) != 1 || peers[0] != "peer.test" {
 		t.Fatalf("duePeers = %v, %v", peers, err)
 	}
-	claimed, err := first.claim(ctx, "peer.test", 2)
+	claimed, err := first.claim(ctx, "peer.test", 2, false)
 	if err != nil || len(claimed) != 2 || claimed[0].ID > claimed[1].ID {
 		t.Fatalf("claim = %+v, %v", claimed, err)
 	}
 	if string(claimed[0].Body) == "" || claimed[0].Attempts != 0 || !claimed[0].CreatedAt.Equal(now) {
 		t.Errorf("claimed row = %+v", claimed[0])
 	}
-	rest, err := second.claim(ctx, "peer.test", 10)
+	rest, err := second.claim(ctx, "peer.test", 10, false)
 	if err != nil || len(rest) != 1 {
 		t.Fatalf("the second worker claimed %d rows, want the one left: %v", len(rest), err)
 	}
-	if more, _ := second.claim(ctx, "peer.test", 10); len(more) != 0 {
+	if more, _ := second.claim(ctx, "peer.test", 10, false); len(more) != 0 {
 		t.Errorf("leased rows were claimed again: %+v", more)
 	}
 
 	// A transient failure releases the row until its retry time.
 	first.reschedule(ctx, claimed[0], 503, "unavailable", time.Minute)
-	if due, _ := second.claim(ctx, "peer.test", 10); len(due) != 0 {
+	if due, _ := second.claim(ctx, "peer.test", 10, false); len(due) != 0 {
 		t.Errorf("a rescheduled row was due early: %+v", due)
 	}
 	first.finish(ctx, claimed[1], "delivered", 202, "")
 
 	// A worker that died holding a lease loses it when the lease runs out.
 	now = now.Add(Lease + time.Minute)
-	again, err := second.claim(ctx, "peer.test", 10)
+	again, err := second.claim(ctx, "peer.test", 10, false)
 	if err != nil || len(again) != 2 {
 		t.Fatalf("after the leases expired %d rows were claimable, want 2: %v", len(again), err)
 	}
@@ -122,7 +122,7 @@ func TestConcurrentClaimsAreDisjoint(t *testing.T) {
 		go func(w *Service) {
 			defer wg.Done()
 			for {
-				rows, err := w.claim(ctx, "peer.test", 3)
+				rows, err := w.claim(ctx, "peer.test", 3, false)
 				if err != nil {
 					t.Error(err)
 					return
@@ -245,7 +245,7 @@ func TestOutboxListsWhereEachEnvelopeWent(t *testing.T) {
 	s := newStoreService(t, db)
 	enqueue(t, s, "peer.test", 1)
 	enqueue(t, s, "other.test", 1)
-	claimed, err := s.claim(ctx, "peer.test", 10)
+	claimed, err := s.claim(ctx, "peer.test", 10, false)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim = %+v, %v", claimed, err)
 	}
@@ -290,7 +290,7 @@ func TestBouncesSayWhenRecipientsAreUnknown(t *testing.T) {
 	d := &recordingDeliverer{}
 	s.Attach(d)
 	enqueue(t, s, "peer.test", 3)
-	rows, err := s.claim(ctx, "peer.test", 10)
+	rows, err := s.claim(ctx, "peer.test", 10, false)
 	if err != nil || len(rows) != 3 {
 		t.Fatalf("claim = %d, %v", len(rows), err)
 	}
@@ -323,7 +323,7 @@ func TestTimedOutEnvelopesAreOwed(t *testing.T) {
 	d := &recordingDeliverer{}
 	s.Attach(d)
 	enqueue(t, s, "peer.test", 1)
-	rows, err := s.claim(ctx, "peer.test", 10)
+	rows, err := s.claim(ctx, "peer.test", 10, false)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("claim = %d, %v", len(rows), err)
 	}
@@ -348,7 +348,7 @@ func TestBackfillResendsOwedEnvelopes(t *testing.T) {
 	up := false
 	s.reachable = func(context.Context, string) bool { return up }
 	enqueue(t, s, "peer.test", 2)
-	rows, err := s.claim(ctx, "peer.test", 10)
+	rows, err := s.claim(ctx, "peer.test", 10, false)
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("claim = %d, %v", len(rows), err)
 	}
@@ -437,7 +437,7 @@ func TestRetriesStopAtTheBudget(t *testing.T) {
 	s.cfg.RetryBudget = 2 * time.Minute
 	s.Attach(&recordingDeliverer{})
 	enqueue(t, s, "peer.test", 1)
-	rows, _ := s.claim(ctx, "peer.test", 10)
+	rows, _ := s.claim(ctx, "peer.test", 10, false)
 	rows[0].Attempts = 10 // a backoff of up to an hour
 	s.reschedule(ctx, rows[0], 503, "unavailable", 0)
 	var next time.Time
@@ -449,7 +449,7 @@ func TestRetriesStopAtTheBudget(t *testing.T) {
 	}
 
 	now = now.Add(3 * time.Minute)
-	rows, _ = s.claim(ctx, "peer.test", 10)
+	rows, _ = s.claim(ctx, "peer.test", 10, false)
 	if len(rows) != 1 {
 		t.Fatalf("claimed %d rows", len(rows))
 	}
@@ -490,7 +490,7 @@ func TestAttachmentsOverThePeerCapAreBouncedTooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := s.claim(ctx, "peer.test", 10)
+	rows, err := s.claim(ctx, "peer.test", 10, false)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("claim = %d, %v", len(rows), err)
 	}

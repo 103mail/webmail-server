@@ -31,3 +31,4 @@ rewrite.
 | [20](0020-read-only-controls-for-the-end-to-end-suite.md) | Read-only controls for the end-to-end suite | webmail-e2e |
 | [21](0021-hardening-the-basic-tier.md) | Hardening the Basic tier | webmail-e2e |
 | [22](0022-meetings-as-a-stack-of-revisions.md) | Meetings as a stack of revisions (proposed) | webmail-federation |
+| [23](0023-federating-chat.md) | Federating chat | webmail-federation |

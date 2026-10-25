@@ -128,6 +128,9 @@ func (s *Service) CloseSession(ctx context.Context, clientID string) error {
 type Target struct {
 	ClientID string
 	ChatID   int64
+	// CustomerID is whose connection it is, which a frame built for that
+	// participant alone needs.
+	CustomerID int64
 }
 
 // SessionsForChat returns every open connection of a chat's participants, each
@@ -136,7 +139,7 @@ type Target struct {
 // (ADR 13).
 func (s *Service) SessionsForChat(ctx context.Context, gChatID int64) ([]Target, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT "s"."client_id", "c"."id" FROM "chat_session" "s" `+
+		`SELECT DISTINCT "s"."client_id", "c"."id", "c"."customer_id" FROM "chat_session" "s" `+
 			`JOIN "chat" "c" ON "c"."customer_id" = "s"."customer_id" AND "c"."g_chat_id" = ? `+
 			`WHERE "c"."deleted_at" IS NULL `+
 			`AND "s"."connected_at" IS NOT NULL AND "s"."closed_at" IS NULL`, gChatID)
@@ -148,7 +151,7 @@ func (s *Service) SessionsForChat(ctx context.Context, gChatID int64) ([]Target,
 	var targets []Target
 	for rows.Next() {
 		var t Target
-		if err := rows.Scan(&t.ClientID, &t.ChatID); err != nil {
+		if err := rows.Scan(&t.ClientID, &t.ChatID, &t.CustomerID); err != nil {
 			return nil, fmt.Errorf("scan target: %w", err)
 		}
 		targets = append(targets, t)
@@ -264,6 +267,12 @@ func (s *Service) MarkChatRead(ctx context.Context, customerID, chatID int64) er
 		if newest == 0 {
 			return nil
 		}
+		// What is about to be read for the first time, and was written
+		// elsewhere, is what the writers' Domains get a receipt for (RFC 14.7).
+		read, err := s.newlyRead(ctx, tx, customerID, chatID)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE "chat_message" SET "read_at" = ? `+
 				`WHERE "customer_id" = ? AND "chat_id" = ? AND "read_at" IS NULL`,
@@ -275,6 +284,6 @@ func (s *Service) MarkChatRead(ctx context.Context, customerID, chatID int64) er
 			newest, customerID, chatID); err != nil {
 			return fmt.Errorf("advance read marker: %w", err)
 		}
-		return nil
+		return s.sendReceipts(ctx, tx, customerID, chatID, read)
 	})
 }

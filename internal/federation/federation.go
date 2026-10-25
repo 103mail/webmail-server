@@ -124,6 +124,9 @@ type Config struct {
 	// conformant (RFC 6.4). BackfillProbe comes from WEBMAIL_BACKFILL_PROBE.
 	RetryBudget   time.Duration `json:"-"`
 	BackfillProbe time.Duration `json:"-"`
+	// ChatRetryBudget is the hour of RFC 14.4, shortened by
+	// WEBMAIL_CHAT_RETRY_BUDGET on a test stack only.
+	ChatRetryBudget time.Duration `json:"-"`
 	// RateLimit caps how many envelopes one peer may have accepted here per
 	// minute and per day (RFC 9.10). Zero takes the default.
 	RateLimit RateLimit `json:"rateLimit"`
@@ -173,6 +176,9 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 	if cfg.BackfillProbe, err = durationFromEnv("WEBMAIL_BACKFILL_PROBE", BackfillProbe); err != nil {
+		return nil, err
+	}
+	if cfg.ChatRetryBudget, err = durationFromEnv("WEBMAIL_CHAT_RETRY_BUDGET", ChatRetryBudget); err != nil {
 		return nil, err
 	}
 	for i := range cfg.Domains {
@@ -324,6 +330,9 @@ type Service struct {
 	deliveryClient  *http.Client
 
 	deliverer Deliverer
+	// chats is nil on a Server without the chat domain, which then neither
+	// advertises chat nor accepts it (RFC 14.1).
+	chats ChatDeliverer
 
 	// reachable reports whether a peer answers, which is when it is backfilled
 	// (RFC 6.4). Tests replace it; it is fetchDescriptor otherwise.
@@ -354,6 +363,9 @@ func New(db *store.DB, cfg *Config, log *slog.Logger, deliverer Deliverer) (*Ser
 		}
 		if cfg.BackfillProbe <= 0 {
 			cfg.BackfillProbe = BackfillProbe
+		}
+		if cfg.ChatRetryBudget <= 0 {
+			cfg.ChatRetryBudget = ChatRetryBudget
 		}
 		if cfg.RateLimit.PerMinute <= 0 {
 			cfg.RateLimit.PerMinute = DefaultPerMinute
@@ -446,6 +458,29 @@ func peerTLSConfig(extraCAFile string) (*tls.Config, error) {
 // construction, and this is the smaller half.
 func (s *Service) Attach(d Deliverer) { s.deliverer = d }
 
+// AttachChat supplies the chat domain, for the same reason as Attach. A
+// Server that attaches it advertises chat and version 0.3 (RFC 14.1).
+func (s *Service) AttachChat(c ChatDeliverer) { s.chats = c }
+
+// Versions are the protocol versions this Server speaks: 0.2, and 0.3 when
+// it does chat (RFC 10, 14.1).
+func (s *Service) Versions() []string {
+	if s.chats == nil {
+		return []string{Version}
+	}
+	return []string{Version, ChatVersion}
+}
+
+// speaks reports whether this Server accepts a protocol version.
+func (s *Service) speaks(version string) bool {
+	for _, v := range s.Versions() {
+		if v == version {
+			return true
+		}
+	}
+	return false
+}
+
 // Enabled reports whether any local Domain is configured.
 func (s *Service) Enabled() bool { return s != nil && len(s.local) > 0 }
 
@@ -480,8 +515,9 @@ func (s *Service) DescriptorFor(domain string) (*Descriptor, bool) {
 		Domain:             d.Domain,
 		PublicKey:          EncodePublicKey(d.key.Public().(ed25519.PublicKey)),
 		PreviousPublicKeys: d.previousPublicKeys(s.now()),
-		Versions:           []string{Version},
+		Versions:           s.Versions(),
 		Registrar:          false,
+		Chat:               s.chats != nil,
 		MaxEnvelopeBytes:   s.cfg.MaxEnvelopeBytes,
 		MaxAttachmentBytes: s.cfg.MaxAttachmentBytes,
 	}, true
@@ -648,7 +684,7 @@ func (s *Service) RegisterLocalDomains(ctx context.Context) error {
 				`ON CONFLICT ("name") DO UPDATE SET "customer_id" = "excluded"."customer_id", "is_local" = TRUE, `+
 				`"public_key" = "excluded"."public_key", "versions" = "excluded"."versions", `+
 				`"discovered_at" = "excluded"."discovered_at"`,
-			d.Domain, customerID, public, Version, s.db.Now()); err != nil {
+			d.Domain, customerID, public, strings.Join(s.Versions(), ","), s.db.Now()); err != nil {
 			return fmt.Errorf("register local domain %s: %w", d.Domain, err)
 		}
 	}

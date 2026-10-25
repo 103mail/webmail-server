@@ -292,6 +292,11 @@ Table "g_chat" {
   "name" varchar(255)
   "created_by_email" varchar(255) [not null]
   "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+  "federation_id" varchar(36) [unique]
+
+  indexes {
+    ("federation_id") [name: "g_chat_federation_id"]
+  }
 }
 
 Table "g_chat_attachment" {
@@ -317,9 +322,11 @@ Table "g_chat_message" {
   "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
   "edited_at" timestamp
   "deleted_at" timestamp
+  "federation_id" varchar(36) [unique]
 
   indexes {
     ("g_chat_id") [name: "g_chat_id"]
+    ("federation_id") [name: "g_chat_message_federation_id"]
   }
 }
 

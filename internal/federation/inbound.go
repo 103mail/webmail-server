@@ -125,8 +125,9 @@ func (s *Service) Receive(ctx context.Context, req *Request) (*Accepted, *Reject
 	if !s.peerAllowed(req.Sender) {
 		return nil, reject(403, ErrPeerNotAllowed, "this Domain does not federate with "+req.Sender)
 	}
-	if req.Version != Version {
-		return nil, reject(400, ErrUnsupportedVersion, "this Domain advertises only "+Version)
+	if !s.speaks(req.Version) {
+		return nil, reject(400, ErrUnsupportedVersion,
+			"this Domain advertises only "+strings.Join(s.Versions(), " and "))
 	}
 
 	// Freshness before signature: a replayed request whose Date has aged out is
@@ -146,6 +147,27 @@ func (s *Service) Receive(ctx context.Context, req *Request) (*Accepted, *Reject
 	// flood cannot fill the replay table with values of its choosing.
 	if r := s.claimNonce(ctx, req.Sender, "inbound", req.Nonce); r != nil {
 		return nil, r
+	}
+
+	// Version 0.3 says what kind of envelope this is. A chat or a read
+	// receipt goes to the chat domain; anything else is mail (RFC 14.2).
+	var peek struct {
+		Version string `json:"version"`
+		Kind    string `json:"kind"`
+	}
+	if err := json.Unmarshal(req.Body, &peek); err != nil {
+		return nil, reject(400, ErrMalformedEnvelope, "envelope is not JSON")
+	}
+	if !s.speaks(peek.Version) {
+		return nil, reject(400, ErrUnsupportedVersion,
+			"this Domain advertises only "+strings.Join(s.Versions(), " and "))
+	}
+	switch peek.Kind {
+	case KindChat, KindChatRead:
+		return s.receiveChat(ctx, req)
+	case "", KindMail:
+	default:
+		return nil, reject(400, ErrUnsupportedKind, "this Domain does not implement kind "+peek.Kind)
 	}
 
 	var envelope Envelope

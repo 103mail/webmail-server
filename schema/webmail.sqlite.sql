@@ -227,8 +227,10 @@ CREATE TABLE "g_chat" (
     "type" TEXT NOT NULL,
     "name" varchar(255),
     "created_by_email" varchar(255) NOT NULL,
-    "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "federation_id" varchar(36) UNIQUE
 );
+CREATE INDEX "g_chat_federation_id" ON "g_chat" ("federation_id");
 
 CREATE TABLE "g_chat_attachment" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -251,9 +253,11 @@ CREATE TABLE "g_chat_message" (
     "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "edited_at" timestamp,
     "deleted_at" timestamp,
+    "federation_id" varchar(36) UNIQUE,
     CONSTRAINT "fk_g_chat_message_g_chat_id" FOREIGN KEY ("g_chat_id") REFERENCES "g_chat" ("id") ON DELETE CASCADE
 );
 CREATE INDEX "g_chat_message_g_chat_id" ON "g_chat_message" ("g_chat_id");
+CREATE INDEX "g_chat_message_federation_id" ON "g_chat_message" ("federation_id");
 
 CREATE TABLE "g_chat_participant" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -318,6 +318,38 @@ func (s *Service) broadcastPresence(ctx context.Context, session *chat.Session, 
 	})
 }
 
+// PushReceived shows a message that arrived from another Domain to every open
+// connection of the chat, each as its own participant sees it. Nobody here
+// sent it, so there is no sender's connection to leave out (RFC 14.4).
+func (s *Service) PushReceived(ctx context.Context, gChatID, gMessageID int64) {
+	if s.pushURL == "" {
+		return
+	}
+	targets, err := s.chat.SessionsForChat(ctx, gChatID)
+	if err != nil {
+		s.log.Error("could not list sessions for a chat", "error", err)
+		return
+	}
+	var wg sync.WaitGroup
+	for _, target := range targets {
+		message, err := s.chat.MessageByCanonical(ctx, target.CustomerID, target.ChatID, gMessageID)
+		if err != nil || message == nil {
+			continue
+		}
+		payload, err := json.Marshal(message)
+		if err != nil {
+			continue
+		}
+		frame := Encode(&Frame{Type: TypeMessage, ChatID: strconv.FormatInt(target.ChatID, 10), Message: payload})
+		wg.Add(1)
+		go func(clientID string) {
+			defer wg.Done()
+			s.push(ctx, clientID, frame)
+		}(target.ClientID)
+	}
+	wg.Wait()
+}
+
 // pushAll posts a frame to each session in parallel. One slow proxy node must
 // not hold up the others, which is the same rule the federation outbox follows.
 func (s *Service) pushAll(ctx context.Context, clientIDs []string, except string, frame *Frame) {

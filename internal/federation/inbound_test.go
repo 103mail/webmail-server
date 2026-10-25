@@ -212,13 +212,18 @@ func TestPeerAllowlist(t *testing.T) {
 }
 
 func TestBackoffStaysWithinItsCap(t *testing.T) {
-	for attempt := 1; attempt <= 20; attempt++ {
-		delay := backoff(attempt)
-		if delay < RetryBase {
-			t.Errorf("attempt %d waits %v, less than the base delay", attempt, delay)
-		}
-		if delay > RetryCap+RetryBase {
-			t.Errorf("attempt %d waits %v, past the cap", attempt, delay)
+	for _, schedule := range []struct {
+		name        string
+		base, limit time.Duration
+	}{{"mail", RetryBase, RetryCap}, {"chat", ChatRetryBase, ChatRetryCap}} {
+		for attempt := 1; attempt <= 20; attempt++ {
+			delay := backoff(attempt, schedule.base, schedule.limit)
+			if delay < schedule.base {
+				t.Errorf("%s attempt %d waits %v, less than the base delay", schedule.name, attempt, delay)
+			}
+			if delay > schedule.limit+schedule.base {
+				t.Errorf("%s attempt %d waits %v, past the cap", schedule.name, attempt, delay)
+			}
 		}
 	}
 }

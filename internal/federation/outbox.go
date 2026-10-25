@@ -123,15 +123,19 @@ func (s *Service) Enqueue(ctx context.Context, tx *sql.Tx, out Outbound) error {
 // outboxRow is one claimed piece of work.
 type outboxRow struct {
 	ID           int64
+	Kind         string
 	PeerDomain   string
 	OriginDomain string
 	Body         []byte
 	EnvelopeID   string
 	Attempts     int
 	CreatedAt    time.Time
+	RelatedID    int64
 }
 
-// Drain sends everything that is due and returns how many rows it handled.
+// Drain sends the mail that is due and returns how many rows it handled. It
+// also backfills, for chat as for mail, since owed messages wait on a peer
+// coming back rather than on a second.
 //
 // Rows are claimed one peer at a time and each peer is processed in its own
 // pass, so one slow or dead Domain delays only the envelopes addressed to it.
@@ -141,7 +145,26 @@ func (s *Service) Drain(ctx context.Context, limit int) (int, error) {
 	if err := s.Backfill(ctx); err != nil {
 		s.log.Error("backfill failed", "error", err)
 	}
-	peers, err := s.duePeers(ctx)
+	return s.drain(ctx, limit, false)
+}
+
+// DrainChat sends the chat envelopes and read receipts that are due. It is
+// the chat loop: run every second, apart from Drain, so that mail waiting on
+// a slow peer never holds a chat up (RFC 14.4).
+func (s *Service) DrainChat(ctx context.Context, limit int) (int, error) {
+	return s.drain(ctx, limit, true)
+}
+
+// kindFilter picks the outbox rows of one loop.
+func kindFilter(chat bool) string {
+	if chat {
+		return `"kind" IN ('` + outboxChat + `', '` + outboxChatRead + `')`
+	}
+	return `"kind" NOT IN ('` + outboxChat + `', '` + outboxChatRead + `')`
+}
+
+func (s *Service) drain(ctx context.Context, limit int, chat bool) (int, error) {
+	peers, err := s.duePeers(ctx, chat)
 	if err != nil {
 		return 0, err
 	}
@@ -150,7 +173,7 @@ func (s *Service) Drain(ctx context.Context, limit int) (int, error) {
 		if ctx.Err() != nil {
 			return handled, ctx.Err()
 		}
-		rows, err := s.claim(ctx, peer, limit)
+		rows, err := s.claim(ctx, peer, limit, chat)
 		if err != nil {
 			s.log.Error("could not claim outbox rows", "peer", peer, "error", err)
 			continue
@@ -166,11 +189,11 @@ func (s *Service) Drain(ctx context.Context, limit int) (int, error) {
 	return handled, nil
 }
 
-func (s *Service) duePeers(ctx context.Context) ([]string, error) {
+func (s *Service) duePeers(ctx context.Context, chat bool) ([]string, error) {
 	now := s.db.Now()
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT "peer_domain" FROM "federation_outbox" `+
-			`WHERE "status" = 'pending' AND "next_retry_at" <= ? `+
+			`WHERE "status" = 'pending' AND "next_retry_at" <= ? AND `+kindFilter(chat)+` `+
 			`AND ("claimed_until" IS NULL OR "claimed_until" < ?)`, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("list peers with work: %w", err)
@@ -196,16 +219,17 @@ func (s *Service) duePeers(ctx context.Context) ([]string, error) {
 // skips the row; SQLite has a single writer, so the question does not arise. A
 // worker that dies holding a lease loses it when it expires, and the row is
 // claimable again: nothing has to notice the death (ADR 19).
-func (s *Service) claim(ctx context.Context, peer string, limit int) ([]outboxRow, error) {
+func (s *Service) claim(ctx context.Context, peer string, limit int, chat bool) ([]outboxRow, error) {
 	now := s.db.Now()
 	rows, err := s.db.QueryContext(ctx,
 		`UPDATE "federation_outbox" SET "claimed_by" = ?, "claimed_until" = ? `+
 			`WHERE "id" IN (SELECT "id" FROM "federation_outbox" `+
-			`WHERE "status" = 'pending' AND "next_retry_at" <= ? AND "peer_domain" = ? `+
+			`WHERE "status" = 'pending' AND "next_retry_at" <= ? AND "peer_domain" = ? AND `+kindFilter(chat)+` `+
 			`AND ("claimed_until" IS NULL OR "claimed_until" < ?) `+
 			`ORDER BY "next_retry_at", "id" LIMIT ?) `+
 			`AND "status" = 'pending' AND ("claimed_until" IS NULL OR "claimed_until" < ?) `+
-			`RETURNING "id", "peer_domain", "origin_domain", "body", "idempotency_key", "attempts", "created_at"`,
+			`RETURNING "id", "kind", "peer_domain", "origin_domain", "body", "idempotency_key", "attempts", `+
+			`"created_at", "related_id"`,
 		s.worker, now.Add(Lease), now, peer, now, limit, now)
 	if err != nil {
 		return nil, fmt.Errorf("claim outbox rows: %w", err)
@@ -214,10 +238,12 @@ func (s *Service) claim(ctx context.Context, peer string, limit int) ([]outboxRo
 	var claimed []outboxRow
 	for rows.Next() {
 		var r outboxRow
-		if err := rows.Scan(&r.ID, &r.PeerDomain, &r.OriginDomain, &r.Body,
-			&r.EnvelopeID, &r.Attempts, &r.CreatedAt); err != nil {
+		var relatedID sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.Kind, &r.PeerDomain, &r.OriginDomain, &r.Body,
+			&r.EnvelopeID, &r.Attempts, &r.CreatedAt, &relatedID); err != nil {
 			return nil, fmt.Errorf("scan outbox row: %w", err)
 		}
+		r.RelatedID = relatedID.Int64
 		claimed = append(claimed, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -231,7 +257,7 @@ func (s *Service) claim(ctx context.Context, peer string, limit int) ([]outboxRo
 // attempt makes one delivery attempt and records what happened.
 func (s *Service) attempt(ctx context.Context, row outboxRow) {
 	// A row whose budget has run out is not tried again (RFC 6.4).
-	if s.db.Now().Sub(row.CreatedAt) >= s.cfg.RetryBudget {
+	if s.db.Now().Sub(row.CreatedAt) >= s.budget(row) {
 		s.owe(ctx, row, 0)
 		return
 	}
@@ -241,7 +267,9 @@ func (s *Service) attempt(ctx context.Context, row outboxRow) {
 	case err == nil && status == http.StatusAccepted:
 		s.finish(ctx, row, "delivered", status, "")
 		s.log.Info("envelope delivered", "peer", row.PeerDomain, "envelope", row.EnvelopeID)
-		if len(refused) > 0 {
+		if isChatKind(row.Kind) {
+			s.afterChatAttempt(ctx, row, status, "", refused, true, false, false)
+		} else if len(refused) > 0 {
 			s.bounceRefused(ctx, row, refused)
 		}
 
@@ -260,7 +288,7 @@ func (s *Service) attempt(ctx context.Context, row outboxRow) {
 		}
 		s.fail(ctx, row, status, code)
 
-	case s.db.Now().Sub(row.CreatedAt) >= s.cfg.RetryBudget:
+	case s.db.Now().Sub(row.CreatedAt) >= s.budget(row):
 		// The 72-hour budget is a hard stop; retrying past it is forbidden and
 		// the sender is owed an answer.
 		s.owe(ctx, row, status)
@@ -288,11 +316,22 @@ func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, 
 	if err != nil {
 		return 0, 0, nil, fmt.Errorf("discover %s: %w", row.PeerDomain, err)
 	}
-	if !peer.Speaks(Version) {
+	// An envelope goes out in the version it was written in. A chat envelope
+	// is sent only to a Domain that lists 0.3, which it does only when it
+	// does chat (RFC 14.1).
+	version := envelopeVersion(row.Body)
+	if !peer.Speaks(version) && version != Version {
+		// A peer pinned before it took up chat still looks as it did then, so
+		// it is asked again before it is taken at its word.
+		if refreshed, err := s.Peer(ctx, row.PeerDomain, true); err == nil {
+			peer = refreshed
+		}
+	}
+	if !peer.Speaks(version) {
 		// Permanent: the peer has told us it does not speak our version, and
 		// no amount of retrying changes that.
 		return http.StatusBadRequest, 0, nil, reject(http.StatusBadRequest, ErrUnsupportedVersion,
-			fmt.Sprintf("peer %s does not speak %s", row.PeerDomain, Version))
+			fmt.Sprintf("peer %s does not speak %s", row.PeerDomain, version))
 	}
 	// Both caps are the peer's, and sending past either is forbidden, so a
 	// message that does not fit is refused here as the peer would (RFC 7).
@@ -310,7 +349,7 @@ func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, 
 		return 0, 0, nil, err
 	}
 	date := HTTPDate(time.Now())
-	signature := Sign(origin.key, Version, origin.Domain, nonce, date, row.Body)
+	signature := Sign(origin.key, version, origin.Domain, nonce, date, row.Body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		BaseURL(row.PeerDomain)+InboundPath, bytes.NewReader(row.Body))
@@ -320,7 +359,7 @@ func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, 
 	req.ContentLength = int64(len(row.Body))
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("Date", date)
-	req.Header.Set("X-Federation-Version", Version)
+	req.Header.Set("X-Federation-Version", version)
 	req.Header.Set("X-Federation-Sender", origin.Domain)
 	req.Header.Set("X-Federation-Nonce", nonce)
 	req.Header.Set("X-Federation-Signature", signature)
@@ -479,14 +518,17 @@ func (s *Service) finish(ctx context.Context, row outboxRow, status string, http
 // than plain exponential so that a peer coming back up is not hit by every
 // queued sender at the same instant.
 func (s *Service) reschedule(ctx context.Context, row outboxRow, httpStatus int, detail string, retryAfter time.Duration) {
-	delay := backoff(row.Attempts + 1)
+	delay := backoff(row.Attempts+1, RetryBase, RetryCap)
+	if isChatKind(row.Kind) {
+		delay = backoff(row.Attempts+1, ChatRetryBase, ChatRetryCap)
+	}
 	if retryAfter > delay {
 		// A peer that told us how long to wait is obeyed, even past the cap.
 		delay = retryAfter
 	}
 	// Never past the budget: the row is looked at again when it runs out, so
 	// the sender hears then and not a backoff later.
-	if deadline := row.CreatedAt.Add(s.cfg.RetryBudget); s.db.Now().Add(delay).After(deadline) {
+	if deadline := row.CreatedAt.Add(s.budget(row)); s.db.Now().Add(delay).After(deadline) {
 		delay = deadline.Sub(s.db.Now())
 	}
 	if _, err := s.db.ExecContext(ctx,
@@ -502,14 +544,23 @@ func (s *Service) reschedule(ctx context.Context, row outboxRow, httpStatus int,
 		"in", delay.String(), "detail", detail)
 }
 
-// backoff is exponential with base 30s and full jitter, capped at one hour.
-func backoff(attempt int) time.Duration {
-	delay := RetryBase << min(attempt-1, 12)
-	if delay > RetryCap || delay <= 0 {
-		delay = RetryCap
+// backoff is exponential from base with full jitter, capped: 30 seconds to an
+// hour for mail (RFC 6.4), a second to a minute for chat (RFC 14.4).
+func backoff(attempt int, base, limit time.Duration) time.Duration {
+	delay := base << min(attempt-1, 12)
+	if delay > limit || delay <= 0 {
+		delay = limit
 	}
 	// #nosec G404 -- jitter spreads retries; it is not a security decision.
-	return time.Duration(rand.Int63n(int64(delay)) + int64(RetryBase))
+	return time.Duration(rand.Int63n(int64(delay)) + int64(base))
+}
+
+// budget is how long a row is retried: 72 hours for mail, one for chat.
+func (s *Service) budget(row outboxRow) time.Duration {
+	if isChatKind(row.Kind) {
+		return s.cfg.ChatRetryBudget
+	}
+	return s.cfg.RetryBudget
 }
 
 // fail retires a row and tells the sender. A permanent failure that stayed
@@ -519,6 +570,10 @@ func (s *Service) fail(ctx context.Context, row outboxRow, httpStatus int, detai
 	s.finish(ctx, row, "permanent_failure", httpStatus, detail)
 	s.log.Error("envelope permanently failed",
 		"peer", row.PeerDomain, "envelope", row.EnvelopeID, "status", httpStatus, "detail", detail)
+	if isChatKind(row.Kind) {
+		s.afterChatAttempt(ctx, row, httpStatus, detail, nil, false, true, false)
+		return
+	}
 	// 404 is only ever no_recipients: none of them exist there (RFC 6.3).
 	s.bounce(ctx, row, httpStatus, detail, httpStatus == http.StatusNotFound, false)
 }
@@ -530,6 +585,10 @@ func (s *Service) owe(ctx context.Context, row outboxRow, httpStatus int) {
 	s.finish(ctx, row, "owed", httpStatus, "timed_out")
 	s.log.Warn("envelope timed out, owed until the peer answers",
 		"peer", row.PeerDomain, "envelope", row.EnvelopeID)
+	if isChatKind(row.Kind) {
+		s.afterChatAttempt(ctx, row, httpStatus, "timed_out", nil, false, false, true)
+		return
+	}
 	s.bounce(ctx, row, httpStatus, "timed_out", false, true)
 }
 
@@ -693,13 +752,14 @@ func (s *Service) Backfill(ctx context.Context) error {
 func (s *Service) requeueOwed(ctx context.Context, peer string) error {
 	return s.db.Tx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx,
-			`SELECT "id", "origin_domain", "body", "related_id" FROM "federation_outbox" `+
+			`SELECT "id", "kind", "origin_domain", "body", "related_id" FROM "federation_outbox" `+
 				`WHERE "status" = 'owed' AND "peer_domain" = ? ORDER BY "id"`, peer)
 		if err != nil {
 			return fmt.Errorf("list owed envelopes: %w", err)
 		}
 		type owed struct {
 			id        int64
+			kind      string
 			origin    string
 			body      string
 			relatedID sql.NullInt64
@@ -707,7 +767,7 @@ func (s *Service) requeueOwed(ctx context.Context, peer string) error {
 		var all []owed
 		for rows.Next() {
 			var o owed
-			if err := rows.Scan(&o.id, &o.origin, &o.body, &o.relatedID); err != nil {
+			if err := rows.Scan(&o.id, &o.kind, &o.origin, &o.body, &o.relatedID); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan owed envelope: %w", err)
 			}
@@ -720,19 +780,13 @@ func (s *Service) requeueOwed(ctx context.Context, peer string) error {
 
 		now := s.db.Now()
 		for _, o := range all {
-			var envelope Envelope
-			if err := json.Unmarshal([]byte(o.body), &envelope); err != nil {
-				return fmt.Errorf("read owed envelope %d: %w", o.id, err)
-			}
 			envelopeID, err := NewUUID()
 			if err != nil {
 				return err
 			}
-			envelope.EnvelopeID = envelopeID
-			envelope.OriginSentAt = FormatTimestamp(now)
-			body, err := json.Marshal(envelope)
+			body, err := renewed(o.body, envelopeID, FormatTimestamp(now))
 			if err != nil {
-				return fmt.Errorf("serialize backfilled envelope: %w", err)
+				return fmt.Errorf("read owed envelope %d: %w", o.id, err)
 			}
 			var relatedID any
 			if o.relatedID.Valid {
@@ -741,8 +795,8 @@ func (s *Service) requeueOwed(ctx context.Context, peer string) error {
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO "federation_outbox" ("kind", "peer_domain", "origin_domain", "body", `+
 					`"idempotency_key", "related_id", "status", "next_retry_at", "created_at") `+
-					"VALUES ('envelope',?,?,?,?,?, 'pending', ?, ?)",
-				peer, o.origin, string(body), envelopeID, relatedID, now, now); err != nil {
+					"VALUES (?,?,?,?,?,?, 'pending', ?, ?)",
+				o.kind, peer, o.origin, string(body), envelopeID, relatedID, now, now); err != nil {
 				return fmt.Errorf("re-queue owed envelope %d: %w", o.id, err)
 			}
 			if _, err := tx.ExecContext(ctx,
@@ -753,4 +807,23 @@ func (s *Service) requeueOwed(ctx context.Context, peer string) error {
 		}
 		return nil
 	})
+}
+
+// renewed is a stored envelope with a new id and send time and everything
+// else as it was, whatever its kind (RFC 6.4, 14.4).
+func renewed(body, envelopeID, sentAt string) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		return nil, err
+	}
+	id, err := json.Marshal(envelopeID)
+	if err != nil {
+		return nil, err
+	}
+	at, err := json.Marshal(sentAt)
+	if err != nil {
+		return nil, err
+	}
+	envelope["envelope_id"], envelope["origin_sent_at"] = id, at
+	return json.Marshal(envelope)
 }

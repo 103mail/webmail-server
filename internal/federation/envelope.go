@@ -10,7 +10,8 @@ import (
 	"time"
 )
 
-// Version is the only protocol version this implementation speaks.
+// Version is the protocol version mail is sent in. A Domain that does chat
+// also speaks ChatVersion, in which mail envelopes are unchanged (RFC 14.2).
 const Version = "0.2"
 
 // InboundPath and WellKnownPath are fixed by the RFC and are never configured
@@ -109,6 +110,9 @@ const (
 	ErrServerError         = "server_error"
 	ErrMalformedEnvelope   = "malformed_envelope"
 	ErrUnknownOriginDomain = "unknown_origin_domain"
+	// ErrUnsupportedKind refuses an envelope of a kind this Domain does not
+	// implement, so that it is never read as mail (RFC 10).
+	ErrUnsupportedKind = "unsupported_kind"
 	// ErrNotAMember answers a message on a thread the Destination holds from
 	// someone who is not a member of it. It is transient (425), because an
 	// invitation may still be on its way (RFC 5.6, 6.3).
@@ -141,8 +145,8 @@ func reject(status int, code, detail string) *Rejection {
 // each attachment's size and hash. It does not check the signature or the
 // sender agreement; those need the request headers and live in verify.
 func (e *Envelope) Validate(maxAttachmentBytes int64) *Rejection {
-	if e.Version != Version {
-		return reject(400, ErrUnsupportedVersion, "this Domain advertises only "+Version)
+	if e.Version != Version && e.Version != ChatVersion {
+		return reject(400, ErrUnsupportedVersion, "a mail envelope is version "+Version+" or "+ChatVersion)
 	}
 	if !validUUID(e.EnvelopeID) {
 		return reject(400, ErrSchemaViolation, "envelope_id is not a UUID")
