@@ -30,3 +30,4 @@ rewrite.
 | [19](0019-postgresql-in-production-sqlite-under-test.md) | PostgreSQL in production, SQLite under test | |
 | [20](0020-read-only-controls-for-the-end-to-end-suite.md) | Read-only controls for the end-to-end suite | webmail-e2e |
 | [21](0021-hardening-the-basic-tier.md) | Hardening the Basic tier | webmail-e2e |
+| [22](0022-meetings-as-a-stack-of-revisions.md) | Meetings as a stack of revisions (proposed) | webmail-federation |
