@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/103mail/webmail-server/internal/calendar"
 	"github.com/103mail/webmail-server/internal/chat"
 	"github.com/103mail/webmail-server/internal/email"
 )
@@ -311,6 +312,12 @@ func (s *Server) result(w http.ResponseWriter, r *http.Request, value any, err e
 	var notYours *email.OnlyYourselfError
 	if errors.As(err, &notYours) {
 		return map[string]any{"error": "only_yourself", "detail": err.Error()}, http.StatusForbidden
+	}
+	if errors.Is(err, calendar.ErrNotOrganizer) {
+		return map[string]any{"error": "not_organizer", "detail": err.Error()}, http.StatusForbidden
+	}
+	if err != nil && isBadInput(err) {
+		return map[string]any{"error": "invalid", "detail": err.Error()}, http.StatusBadRequest
 	}
 	if err != nil {
 		s.fail(w, r, err)

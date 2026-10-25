@@ -26,11 +26,12 @@ expansion, never as a stored offset.
 All-day events set `is_all_day` and store times at midnight in the event's
 timezone. They render as a date with no time.
 
-Recurrence lives in `g_schedule.repeat_rule` as an RRULE, with
-`recurrence_dates` for irregular extra occurrences and `exception_dates` for
-exclusions. `repeat_rule_human_readable` carries the description for display.
-Editing a single occurrence generates a concrete `g_meeting` for it and leaves
-the series intact.
+Recurrence lives in `g_meeting_revision.repeat` as the JSON of RFC 15.6,
+modelled on RRULE, with `extra` for irregular extra occurrences. There are no
+exclusions: an occurrence is taken out by cancelling it. Changing a single
+occurrence is an override in `g_meeting_revision.overrides`, keyed by the
+start it has by the rule, in a new revision; the series is never expanded into
+rows (ADR 22). The description for display is computed from the rule.
 
 ## Consequences
 

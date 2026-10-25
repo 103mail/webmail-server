@@ -156,7 +156,15 @@ paths:
     put:
       tags:
         - Meeting
-      summary: Edit the specified meeting
+      summary: Answer the specified meeting, or change it
+      description: >-
+        With willAttend, records the caller's answer, for the whole meeting or,
+        with occurrence, for one occurrence of a series. Any other field
+        changes the meeting, which only its organizer can do: the change is a
+        new revision, sent to every attendee (ADR 22, RFC 15.3). With
+        occurrence, the change applies to that occurrence alone, and only
+        status, title, descriptionHtml, startTime and endTime may be given.
+        A body with none of these changes nothing.
       parameters:
         - in: path
           name: id
@@ -167,7 +175,7 @@ paths:
           description: Numeric identifier of the meeting to operate on
       operationId: editMeeting
       requestBody:
-        description: Request to edit a meeting's attendance status
+        description: An answer, or a change to the meeting
         required: true
         content:
           application/x-www-form-urlencoded:
@@ -179,6 +187,32 @@ paths:
                   enum: ["yes", "no", "maybe", null]
                   example: "yes"
                   description: Attendance status for the meeting
+                occurrence:
+                  type: string
+                  format: date-time
+                  example: "2025-10-29T13:00:00.000Z"
+                  description: The occurrence answered or changed, as the occurrence field of a listed meeting names it
+                status:
+                  type: string
+                  enum: ["confirmed", "cancelled"]
+                  description: Cancels the meeting or occurrence, or confirms it again
+                title:
+                  type: string
+                startTime:
+                  type: string
+                  format: date-time
+                endTime:
+                  type: string
+                  format: date-time
+                timeZone:
+                  type: string
+                isAllDay:
+                  type: boolean
+                repeatRule:
+                  type: string
+                  description: A new repeat rule, or empty for a single meeting
+                descriptionHtml:
+                  type: string
       responses:
         "200":
           description: Operation succeeded
@@ -187,13 +221,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/Success"
         "400":
-          description: Invalid willAttend value
+          description: Invalid answer or change
         "401":
           description: Access token is missing or invalid
+        "403":
+          description: Only the organizer can change the meeting
     delete:
       tags:
         - Meeting
       summary: Delete the specified meeting
+      description: >-
+        Hides the meeting from the caller. It is not an answer: they stay
+        invited, and a new revision brings the meeting back (RFC 15.7).
       parameters:
         - in: path
           name: id
@@ -217,6 +256,10 @@ paths:
       tags:
         - Attendee
       summary: Add an attendee to the specified meeting
+      description: >-
+        Only the organizer invites. An address on a Domain that does not do
+        calendar, or on no Webmail Domain, is not invited, and the organizer
+        is told in their inbox (RFC 15.1).
       parameters:
         - in: path
           name: meetingId
@@ -252,6 +295,44 @@ paths:
           description: Invalid attendee email address
         "401":
           description: Access token is missing or invalid
+        "403":
+          description: Only the organizer can invite
+    delete:
+      tags:
+        - Attendee
+      summary: Remove an attendee from the specified meeting
+      description: >-
+        Only the organizer removes, by a new revision that is also sent to the
+        one removed, who is then shown the meeting as cancelled (RFC 15.4).
+      parameters:
+        - in: path
+          name: meetingId
+          schema:
+            type: integer
+            format: int64
+          required: true
+          description: Numeric identifier of the meeting to operate on
+        - in: query
+          name: email
+          schema:
+            type: string
+            format: email
+          required: true
+          description: Email address of the attendee to remove
+      operationId: removeAttendee
+      responses:
+        "200":
+          description: Operation succeeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Success"
+        "400":
+          description: Missing email, or the organizer
+        "401":
+          description: Access token is missing or invalid
+        "403":
+          description: Only the organizer can remove
   /document/{id}:
     post:
       tags:
@@ -265,6 +346,7 @@ paths:
             format: int64
           required: true
           description: Numeric identifier of the meeting to operate on
+      description: Only the organizer adds documents; the document travels with every later revision.
       operationId: addDocument
       requestBody:
         description: Request to add a document to a meeting
@@ -394,7 +476,39 @@ components:
           type: integer
           format: int64
           example: 1
-          description: Unique identifier for the meeting
+          description: Unique identifier for the meeting, the same for every occurrence
+        occurrence:
+          type: string
+          format: date-time
+          example: "2025-10-29T13:00:00.000Z"
+          description: The start this occurrence has by the meeting's rule, which an answer or change for it names
+        status:
+          type: string
+          enum: ["confirmed", "cancelled"]
+          description: Cancelled when the meeting or this occurrence is, or when the caller was removed
+        revision:
+          type: integer
+          description: The revision of the meeting shown
+        unseen:
+          type: boolean
+          description: True when the caller has not answered or written this revision
+        isOrganizer:
+          type: boolean
+          description: True when the caller organizes the meeting and can change it
+        repeat:
+          type: [object, "null"]
+          description: The rule of a series, as RFC 15.6 writes it
+        repeatText:
+          type: string
+          example: "weekly on Tuesday, 6 times"
+        attendees:
+          type: array
+          items:
+            $ref: "#/components/schemas/Attendee"
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentRef"
         calendarId:
           type: integer
           format: int64
@@ -451,6 +565,38 @@ components:
           format: int32
           example: 0
           description: Horizontal position for display purposes
+    Attendee:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        willAttend:
+          type: [string, "null"]
+          enum: ["yes", "no", "maybe", null]
+          description: The attendee's answer for this occurrence
+        revision:
+          type: integer
+          description: The revision the answer was given to
+        answeredAt:
+          type: [string, "null"]
+          format: date-time
+        outdated:
+          type: boolean
+          description: True when the answer was given to an earlier revision
+    DocumentRef:
+      type: object
+      properties:
+        documentId:
+          type: integer
+          format: int64
+        fileName:
+          type: string
+        mimeType:
+          type: string
+        fileSize:
+          type: integer
+          format: int64
     Document:
       type: object
       properties:

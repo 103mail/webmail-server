@@ -31,7 +31,9 @@ because there is no working implementation to port. A calendar is a mailbox:
 Recurrence expands through `internal/rrule`, a subset of RFC 5545 covering
 FREQ, INTERVAL, COUNT, UNTIL, BYDAY and BYMONTHDAY. Parts outside the subset are
 reported as errors rather than ignored, so a rule is never expanded into the
-wrong dates.
+wrong dates. Since ADR 22 the rule is stored as the JSON of RFC 15.6, and the
+API's RRULE is converted to it on the way in; BYDAY with a monthly or yearly
+rule has no place there and is refused.
 
 Chat presence, typing indicators and delivery status are implemented against
 `presence_status`, `typing_indicator` and `message_status`, where the PHP returns

@@ -127,7 +127,10 @@ paths:
         "400":
           description: >-
             Permanent: `malformed_envelope`, `schema_violation`,
-            `unsupported_version`, `attachment_mismatch` or `not_registrar`
+            `unsupported_version`, `unsupported_kind` (a kind of 0.3 this
+            Domain does not implement), `attachment_mismatch` or
+            `not_registrar`; for a meeting also `organizer_mismatch`,
+            `unknown_time_zone` or `unsupported_repeat` (RFC 15)
           content:
             application/json:
               schema:
@@ -165,7 +168,8 @@ paths:
                 $ref: "#/components/schemas/Error"
         "425":
           description: >-
-            Transient: the sender is not (yet) a member of the thread
+            Transient: the sender is not (yet) a member of the thread or
+            chat, or an answer is for a meeting this Domain does not hold yet
             (`not_a_member`), for example while an invitation is in flight
           content:
             application/json:
@@ -236,6 +240,14 @@ components:
         registrar:
           type: boolean
           example: false
+        chat:
+          type: boolean
+          example: true
+          description: The Domain implements the chat extension (RFC 14), on version 0.3
+        calendar:
+          type: boolean
+          example: true
+          description: The Domain implements the calendar extension (RFC 15), on version 0.3
         max_envelope_bytes:
           type: integer
           format: int64

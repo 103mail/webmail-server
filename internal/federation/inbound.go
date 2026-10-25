@@ -165,6 +165,8 @@ func (s *Service) Receive(ctx context.Context, req *Request) (*Accepted, *Reject
 	switch peek.Kind {
 	case KindChat, KindChatRead:
 		return s.receiveChat(ctx, req)
+	case KindMeeting, KindMeetingRSVP:
+		return s.receiveMeeting(ctx, req, peek.Kind)
 	case "", KindMail:
 	default:
 		return nil, reject(400, ErrUnsupportedKind, "this Domain does not implement kind "+peek.Kind)

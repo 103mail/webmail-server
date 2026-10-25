@@ -269,6 +269,8 @@ func (s *Service) attempt(ctx context.Context, row outboxRow) {
 		s.log.Info("envelope delivered", "peer", row.PeerDomain, "envelope", row.EnvelopeID)
 		if isChatKind(row.Kind) {
 			s.afterChatAttempt(ctx, row, status, "", refused, true, false, false)
+		} else if isMeetingKind(row.Kind) {
+			s.afterMeetingAttempt(ctx, row, status, "", refused, false, false)
 		} else if len(refused) > 0 {
 			s.bounceRefused(ctx, row, refused)
 		}
@@ -332,6 +334,17 @@ func (s *Service) post(ctx context.Context, row outboxRow) (int, time.Duration, 
 		// no amount of retrying changes that.
 		return http.StatusBadRequest, 0, nil, reject(http.StatusBadRequest, ErrUnsupportedVersion,
 			fmt.Sprintf("peer %s does not speak %s", row.PeerDomain, version))
+	}
+	// A meeting or an answer goes only to a Domain that advertises calendar,
+	// which 0.3 alone does not say (RFC 15.1).
+	if isMeetingKind(row.Kind) && !peer.Calendar {
+		if refreshed, err := s.Peer(ctx, row.PeerDomain, true); err == nil {
+			peer = refreshed
+		}
+		if !peer.Calendar {
+			return http.StatusBadRequest, 0, nil, reject(http.StatusBadRequest, ErrUnsupportedKind,
+				fmt.Sprintf("peer %s does not advertise calendar", row.PeerDomain))
+		}
 	}
 	// Both caps are the peer's, and sending past either is forbidden, so a
 	// message that does not fit is refused here as the peer would (RFC 7).
@@ -574,6 +587,10 @@ func (s *Service) fail(ctx context.Context, row outboxRow, httpStatus int, detai
 		s.afterChatAttempt(ctx, row, httpStatus, detail, nil, false, true, false)
 		return
 	}
+	if isMeetingKind(row.Kind) {
+		s.afterMeetingAttempt(ctx, row, httpStatus, detail, nil, true, false)
+		return
+	}
 	// 404 is only ever no_recipients: none of them exist there (RFC 6.3).
 	s.bounce(ctx, row, httpStatus, detail, httpStatus == http.StatusNotFound, false)
 }
@@ -587,6 +604,10 @@ func (s *Service) owe(ctx context.Context, row outboxRow, httpStatus int) {
 		"peer", row.PeerDomain, "envelope", row.EnvelopeID)
 	if isChatKind(row.Kind) {
 		s.afterChatAttempt(ctx, row, httpStatus, "timed_out", nil, false, false, true)
+		return
+	}
+	if isMeetingKind(row.Kind) {
+		s.afterMeetingAttempt(ctx, row, httpStatus, "timed_out", nil, false, true)
 		return
 	}
 	s.bounce(ctx, row, httpStatus, "timed_out", false, true)

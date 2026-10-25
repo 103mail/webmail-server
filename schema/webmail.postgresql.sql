@@ -157,7 +157,9 @@ CREATE TABLE "domain" (
     "max_envelope_bytes" bigint NOT NULL DEFAULT 10485760,
     "max_attachment_bytes" bigint NOT NULL DEFAULT 26214400,
     "discovered_at" timestamp,
-    "discovery_failed_at" timestamp
+    "discovery_failed_at" timestamp,
+    "has_chat" boolean NOT NULL DEFAULT FALSE,
+    "has_calendar" boolean NOT NULL DEFAULT FALSE
 );
 CREATE INDEX "domain_customer_id" ON "domain" ("customer_id");
 CREATE INDEX "is_local" ON "domain" ("is_local");
@@ -238,15 +240,6 @@ CREATE TABLE "g_attachment" (
 CREATE INDEX "g_attachment_thread_id" ON "g_attachment" ("g_message_id");
 CREATE INDEX "g_attachment_federation_id" ON "g_attachment" ("federation_id");
 
-CREATE TABLE "g_attendee" (
-    "id" BIGSERIAL PRIMARY KEY,
-    "g_meeting_id" bigint NOT NULL,
-    "email" varchar(255) NOT NULL,
-    "will_attend" "will_attend" NOT NULL DEFAULT 'maybe',
-    "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX "g_attendee_g_meeting_id" ON "g_attendee" ("g_meeting_id");
-
 CREATE TABLE "g_chat" (
     "id" BIGSERIAL PRIMARY KEY,
     "type" "g_chat_type" NOT NULL,
@@ -292,32 +285,68 @@ CREATE TABLE "g_chat_participant" (
 );
 CREATE INDEX "g_chat_participant_g_chat_id" ON "g_chat_participant" ("g_chat_id");
 
-CREATE TABLE "g_document" (
-    "id" BIGSERIAL PRIMARY KEY,
-    "g_meeting_id" bigint NOT NULL,
-    "file_name" varchar(255) NOT NULL,
-    "mime_type" varchar(255) NOT NULL,
-    "file_size" integer NOT NULL,
-    "hash_md5" varchar(255) NOT NULL
-);
-CREATE INDEX "g_document_g_meeting_id" ON "g_document" ("g_meeting_id");
-
 CREATE TABLE "g_meeting" (
     "id" BIGSERIAL PRIMARY KEY,
-    "g_schedule" bigint,
+    "federation_id" varchar(36) NOT NULL UNIQUE,
+    "organizer_email" varchar(255) NOT NULL,
+    "organizer_name" varchar(255) NOT NULL DEFAULT '',
+    "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX "g_meeting_federation_id" ON "g_meeting" ("federation_id");
+
+CREATE TABLE "g_meeting_revision" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "g_meeting_id" bigint NOT NULL,
+    "revision" integer NOT NULL,
+    "status" varchar(16) NOT NULL DEFAULT 'confirmed',
     "title" varchar(255) NOT NULL,
+    "description" text NOT NULL,
+    "description_html" text,
     "start_time" timestamp NOT NULL,
     "end_time" timestamp NOT NULL,
     "time_zone" varchar(255) NOT NULL,
     "is_all_day" boolean NOT NULL DEFAULT FALSE,
-    "organizer_email" varchar(255) NOT NULL,
-    "organizer_name" varchar(255) NOT NULL,
-    "description" text NOT NULL,
-    "description_html" text,
-    "created_at" timestamp DEFAULT CURRENT_TIMESTAMP,
-    "sent_at" timestamp
+    "repeat" text,
+    "overrides" text,
+    "first_start" timestamp NOT NULL,
+    "last_end" timestamp,
+    "changed_at" timestamp NOT NULL,
+    "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX "g_meeting_g_schedule" ON "g_meeting" ("g_schedule");
+CREATE UNIQUE INDEX "meeting_revision" ON "g_meeting_revision" ("g_meeting_id", "revision");
+CREATE INDEX "first_start" ON "g_meeting_revision" ("first_start");
+
+CREATE TABLE "g_meeting_attendee" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "g_meeting_revision_id" bigint NOT NULL,
+    "email" varchar(255) NOT NULL
+);
+CREATE UNIQUE INDEX "revision_email" ON "g_meeting_attendee" ("g_meeting_revision_id", "email");
+CREATE INDEX "email" ON "g_meeting_attendee" ("email");
+
+CREATE TABLE "g_meeting_rsvp" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "g_meeting_id" bigint NOT NULL,
+    "email" varchar(255) NOT NULL,
+    "will_attend" "will_attend" NOT NULL,
+    "revision" integer NOT NULL,
+    "occurrence" varchar(32),
+    "answered_at" timestamp NOT NULL,
+    "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX "meeting_email" ON "g_meeting_rsvp" ("g_meeting_id", "email");
+
+CREATE TABLE "g_meeting_document" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "g_meeting_revision_id" bigint NOT NULL,
+    "federation_id" varchar(36) NOT NULL,
+    "file_name" varchar(255) NOT NULL,
+    "mime_type" varchar(255) NOT NULL,
+    "file_size" integer NOT NULL,
+    "hash_md5" varchar(255) NOT NULL,
+    "hash_sha256" varchar(64) NOT NULL
+);
+CREATE INDEX "g_meeting_revision_id" ON "g_meeting_document" ("g_meeting_revision_id");
 
 CREATE TABLE "g_message" (
     "id" BIGSERIAL PRIMARY KEY,
@@ -332,19 +361,6 @@ CREATE TABLE "g_message" (
 );
 CREATE INDEX "g_message_g_thread_id" ON "g_message" ("g_thread_id");
 CREATE INDEX "g_message_federation_id" ON "g_message" ("federation_id");
-
-CREATE TABLE "g_schedule" (
-    "id" BIGSERIAL PRIMARY KEY,
-    "start_time" timestamp NOT NULL,
-    "end_time" timestamp NOT NULL,
-    "time_zone" varchar(255) NOT NULL,
-    "repeat_rule" text NOT NULL,
-    "recurrence_dates" text NOT NULL,
-    "exception_dates" text NOT NULL,
-    "repeat_rule_human_readable" varchar(255) NOT NULL,
-    "created_at" timestamp DEFAULT CURRENT_TIMESTAMP,
-    "sent_at" timestamp
-);
 
 CREATE TABLE "g_subscription" (
     "id" BIGSERIAL PRIMARY KEY,
@@ -393,13 +409,13 @@ CREATE TABLE "meeting" (
     "customer_id" bigint NOT NULL,
     "g_meeting_id" bigint NOT NULL,
     "mailbox_id" bigint NOT NULL,
-    "schedule_id" bigint,
-    "will_attend" "will_attend"
+    "seen_revision" integer NOT NULL DEFAULT 0,
+    "deleted_at" timestamp
 );
 CREATE INDEX "meeting_customer_id" ON "meeting" ("customer_id");
 CREATE INDEX "meeting_g_meeting_id" ON "meeting" ("g_meeting_id");
 CREATE INDEX "meeting_mailbox_id" ON "meeting" ("mailbox_id");
-CREATE INDEX "schedule_id" ON "meeting" ("schedule_id");
+CREATE UNIQUE INDEX "mailbox_meeting" ON "meeting" ("mailbox_id", "g_meeting_id");
 
 CREATE TABLE "message" (
     "id" BIGSERIAL PRIMARY KEY,
@@ -453,16 +469,6 @@ CREATE INDEX "reminder_event_g_meeting_id" ON "reminder_event" ("g_meeting_id");
 CREATE INDEX "reminder_event_mailbox_id" ON "reminder_event" ("mailbox_id");
 CREATE INDEX "scheduled_at" ON "reminder_event" ("scheduled_at");
 CREATE INDEX "sent_at" ON "reminder_event" ("sent_at");
-
-CREATE TABLE "schedule" (
-    "id" BIGSERIAL PRIMARY KEY,
-    "customer_id" bigint NOT NULL,
-    "g_schedule_id" bigint NOT NULL,
-    "mailbox_id" bigint NOT NULL
-);
-CREATE INDEX "schedule_customer_id" ON "schedule" ("customer_id");
-CREATE INDEX "g_schedule_id" ON "schedule" ("g_schedule_id");
-CREATE INDEX "schedule_mailbox_id" ON "schedule" ("mailbox_id");
 
 CREATE TABLE "sent_email" (
     "id" SERIAL PRIMARY KEY,
@@ -556,12 +562,13 @@ ALTER TABLE "domain" ADD CONSTRAINT "fk_domain_customer_id" FOREIGN KEY ("custom
 ALTER TABLE "folder" ADD CONSTRAINT "fk_folder_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE;
 ALTER TABLE "folder" ADD CONSTRAINT "fk_folder_mailbox_id" FOREIGN KEY ("mailbox_id") REFERENCES "mailbox" ("id") ON DELETE CASCADE;
 ALTER TABLE "g_attachment" ADD CONSTRAINT "fk_g_attachment_g_message_id" FOREIGN KEY ("g_message_id") REFERENCES "g_message" ("id") ON DELETE CASCADE;
-ALTER TABLE "g_attendee" ADD CONSTRAINT "fk_g_attendee_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE;
 ALTER TABLE "g_chat_attachment" ADD CONSTRAINT "fk_g_chat_attachment_g_chat_message_id" FOREIGN KEY ("g_chat_message_id") REFERENCES "g_chat_message" ("id") ON DELETE CASCADE;
 ALTER TABLE "g_chat_message" ADD CONSTRAINT "fk_g_chat_message_g_chat_id" FOREIGN KEY ("g_chat_id") REFERENCES "g_chat" ("id") ON DELETE CASCADE;
 ALTER TABLE "g_chat_participant" ADD CONSTRAINT "fk_g_chat_participant_g_chat_id" FOREIGN KEY ("g_chat_id") REFERENCES "g_chat" ("id") ON DELETE CASCADE;
-ALTER TABLE "g_document" ADD CONSTRAINT "fk_g_document_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE;
-ALTER TABLE "g_meeting" ADD CONSTRAINT "fk_g_meeting_g_schedule" FOREIGN KEY ("g_schedule") REFERENCES "g_schedule" ("id");
+ALTER TABLE "g_meeting_attendee" ADD CONSTRAINT "fk_g_meeting_attendee_g_meeting_revision_id" FOREIGN KEY ("g_meeting_revision_id") REFERENCES "g_meeting_revision" ("id") ON DELETE CASCADE;
+ALTER TABLE "g_meeting_document" ADD CONSTRAINT "fk_g_meeting_document_g_meeting_revision_id" FOREIGN KEY ("g_meeting_revision_id") REFERENCES "g_meeting_revision" ("id") ON DELETE CASCADE;
+ALTER TABLE "g_meeting_rsvp" ADD CONSTRAINT "fk_g_meeting_rsvp_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE;
+ALTER TABLE "g_meeting_revision" ADD CONSTRAINT "fk_g_meeting_revision_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE;
 ALTER TABLE "g_message" ADD CONSTRAINT "fk_g_message_g_thread_id" FOREIGN KEY ("g_thread_id") REFERENCES "g_thread" ("id") ON DELETE CASCADE;
 ALTER TABLE "g_subscription" ADD CONSTRAINT "fk_g_subscription_g_thread_id" FOREIGN KEY ("g_thread_id") REFERENCES "g_thread" ("id") ON DELETE CASCADE;
 ALTER TABLE "mailbox" ADD CONSTRAINT "fk_mailbox_default_folder_id" FOREIGN KEY ("default_folder_id") REFERENCES "folder" ("id") ON DELETE SET NULL;
@@ -570,7 +577,6 @@ ALTER TABLE "mailbox" ADD CONSTRAINT "fk_mailbox_customer_id" FOREIGN KEY ("cust
 ALTER TABLE "mailbox" ADD CONSTRAINT "fk_mailbox_user_id" FOREIGN KEY ("user_id") REFERENCES "user" ("id") ON DELETE SET NULL;
 ALTER TABLE "meeting" ADD CONSTRAINT "fk_meeting_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE;
 ALTER TABLE "meeting" ADD CONSTRAINT "fk_meeting_mailbox_id" FOREIGN KEY ("mailbox_id") REFERENCES "mailbox" ("id") ON DELETE CASCADE;
-ALTER TABLE "meeting" ADD CONSTRAINT "fk_meeting_schedule_id" FOREIGN KEY ("schedule_id") REFERENCES "schedule" ("id");
 ALTER TABLE "meeting" ADD CONSTRAINT "fk_meeting_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE;
 ALTER TABLE "message" ADD CONSTRAINT "fk_message_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE;
 ALTER TABLE "message" ADD CONSTRAINT "fk_message_thread_id" FOREIGN KEY ("thread_id") REFERENCES "thread" ("id") ON DELETE CASCADE;
@@ -582,9 +588,6 @@ ALTER TABLE "presence_status" ADD CONSTRAINT "fk_presence_status_user_id" FOREIG
 ALTER TABLE "reminder_event" ADD CONSTRAINT "fk_reminder_event_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE;
 ALTER TABLE "reminder_event" ADD CONSTRAINT "fk_reminder_event_mailbox_id" FOREIGN KEY ("mailbox_id") REFERENCES "mailbox" ("id") ON DELETE CASCADE;
 ALTER TABLE "reminder_event" ADD CONSTRAINT "fk_reminder_event_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE;
-ALTER TABLE "schedule" ADD CONSTRAINT "fk_schedule_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE;
-ALTER TABLE "schedule" ADD CONSTRAINT "fk_schedule_mailbox_id" FOREIGN KEY ("mailbox_id") REFERENCES "mailbox" ("id") ON DELETE CASCADE;
-ALTER TABLE "schedule" ADD CONSTRAINT "fk_schedule_g_schedule_id" FOREIGN KEY ("g_schedule_id") REFERENCES "g_schedule" ("id") ON DELETE CASCADE;
 ALTER TABLE "sent_email" ADD CONSTRAINT "fk_sent_email_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE;
 ALTER TABLE "thread" ADD CONSTRAINT "fk_thread_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE;
 ALTER TABLE "thread" ADD CONSTRAINT "fk_thread_folder_id" FOREIGN KEY ("folder_id") REFERENCES "folder" ("id") ON DELETE CASCADE;

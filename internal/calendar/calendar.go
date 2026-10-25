@@ -1,24 +1,32 @@
 // Package calendar implements the calendaring domain: calendars, meetings,
-// attendees and documents.
+// attendees, answers and documents.
 //
-// It is a reimplementation rather than a direct port. The PHP CalendarClient
-// reads a `calendar` table and g_meeting columns (g_schedule_id, repeat_rule,
-// sender_email, sender_name) that exist in neither the live database nor the
-// test schema, so it cannot run as written. This package follows the schema and
-// the OpenAPI definition instead, and treats a calendar as a mailbox, which is
-// what the meeting listing already assumes by reporting meeting.mailbox_id as
-// the calendarId.
+// A meeting is stored the way a thread is (ADR 22). g_meeting says who
+// organizes it; every change the organizer makes is a new row in
+// g_meeting_revision with its attendees and documents, and every answer a new
+// row in g_meeting_rsvp. Nothing canonical is updated or deleted. A customer
+// sees the latest revision and the latest answers, through one `meeting`
+// projection per meeting, and a series is expanded into occurrences when a
+// calendar is read, by internal/rrule.
+//
+// Meetings cross Domains as RFC 15 describes: the organizer's Domain sends
+// every revision to the Domains of the attendees, and each attendee's Domain
+// sends their answers to all the others (federate.go, receive.go). A calendar
+// is a mailbox, as ADR 14 decided: calendarId is the mailbox id.
 package calendar
 
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/103mail/webmail-server/internal/blob"
-	"github.com/103mail/webmail-server/internal/mdconv"
+	"github.com/103mail/webmail-server/internal/federation"
 	"github.com/103mail/webmail-server/internal/rrule"
 	"github.com/103mail/webmail-server/internal/store"
 )
@@ -27,11 +35,39 @@ import (
 type Service struct {
 	db   *store.DB
 	blob *blob.Store
+	// fed is nil on a Server without federation, where every address is
+	// local and no meeting leaves it.
+	fed Federator
+	// notices writes the organizer's mailer-daemon messages; nil drops them.
+	notices Noticer
 }
 
 // New returns a Service. documents is the directory holding document bytes.
 func New(db *store.DB, documents *blob.Store) *Service {
 	return &Service{db: db, blob: documents}
+}
+
+// Noticer writes a local message from mailer-daemon into someone's inbox. It
+// is satisfied by *email.Service and never sends anything off this Server
+// (RFC 15.1, 15.4).
+type Noticer interface {
+	Notice(ctx context.Context, originDomain, recipient, subject, body string) error
+}
+
+// NotifyBy supplies the mail domain that tells organizers who their
+// invitations did not reach.
+func (s *Service) NotifyBy(n Noticer) { s.notices = n }
+
+// ErrNotOrganizer refuses a change to a meeting by anyone but its organizer,
+// who is the only one who can change it, invite or remove (RFC 15.4, ADR 22).
+var ErrNotOrganizer = errors.New("only the organizer can change a meeting")
+
+// ErrBadInput is a change that cannot be made as asked, such as an end before
+// the start or an occurrence the meeting does not have.
+var ErrBadInput = errors.New("invalid meeting")
+
+func badInput(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrBadInput, fmt.Sprintf(format, args...))
 }
 
 // Calendar is a mailbox viewed as a calendar.
@@ -43,22 +79,55 @@ type Calendar struct {
 	IsShared   bool   `json:"isShared"`
 }
 
-// Meeting is an event as one customer sees it, including the layout hints the
-// day view uses to place overlapping events side by side.
+// Meeting is one occurrence of a meeting as one customer sees it, including
+// the layout hints the day view uses to place overlapping events side by side.
 type Meeting struct {
-	MeetingID          int64   `json:"meetingId"`
-	CalendarID         int64   `json:"calendarId"`
-	Title              string  `json:"title"`
-	StartTime          string  `json:"startTime"`
-	EndTime            string  `json:"endTime"`
-	TimeZone           string  `json:"timeZone"`
-	IsAllDay           bool    `json:"isAllDay"`
-	OrganizerEmail     string  `json:"organizerEmail"`
-	OrganizerName      string  `json:"organizerName"`
-	Description        string  `json:"description"`
-	WillAttend         *string `json:"willAttend"`
-	WidthFraction      int     `json:"widthFraction"`
-	HorizontalPosition int     `json:"horizontalPosition"`
+	MeetingID int64 `json:"meetingId"`
+	// Occurrence is what this occurrence is known by, the start it has by
+	// its rule, which an answer for it names (RFC 15.5).
+	Occurrence     string  `json:"occurrence"`
+	CalendarID     int64   `json:"calendarId"`
+	Title          string  `json:"title"`
+	StartTime      string  `json:"startTime"`
+	EndTime        string  `json:"endTime"`
+	TimeZone       string  `json:"timeZone"`
+	IsAllDay       bool    `json:"isAllDay"`
+	OrganizerEmail string  `json:"organizerEmail"`
+	OrganizerName  string  `json:"organizerName"`
+	Description    string  `json:"description"`
+	WillAttend     *string `json:"willAttend"`
+	// Status is cancelled when the meeting or this occurrence is, and for
+	// someone the organizer removed (RFC 15.4).
+	Status      string `json:"status"`
+	Revision    int    `json:"revision"`
+	Unseen      bool   `json:"unseen"`
+	IsOrganizer bool   `json:"isOrganizer"`
+	// Repeat is the rule of a series, and RepeatText the rule in words.
+	Repeat             *rrule.Repeat `json:"repeat"`
+	RepeatText         string        `json:"repeatText"`
+	Attendees          []Attendee    `json:"attendees"`
+	Documents          []DocumentRef `json:"documents"`
+	WidthFraction      int           `json:"widthFraction"`
+	HorizontalPosition int           `json:"horizontalPosition"`
+}
+
+// Attendee is one invited address and how it answered this occurrence.
+type Attendee struct {
+	Email      string  `json:"email"`
+	WillAttend *string `json:"willAttend"`
+	// Revision is the revision the answer was given to. Outdated marks an
+	// answer given to an earlier version of the meeting (RFC 15.5).
+	Revision   int     `json:"revision"`
+	AnsweredAt *string `json:"answeredAt"`
+	Outdated   bool    `json:"outdated"`
+}
+
+// DocumentRef is a document of the meeting, without its bytes.
+type DocumentRef struct {
+	DocumentID int64  `json:"documentId"`
+	FileName   string `json:"fileName"`
+	MimeType   string `json:"mimeType"`
+	FileSize   int64  `json:"fileSize"`
 }
 
 // Document is a meeting attachment with its bytes.
@@ -67,18 +136,6 @@ type Document struct {
 	MimeType string `json:"mimeType"`
 	FileSize int64  `json:"fileSize"`
 	FileData []byte `json:"fileData"`
-}
-
-// NewMeeting is the input for creating an event.
-type NewMeeting struct {
-	Attendees       []string
-	Title           string
-	StartTime       time.Time
-	EndTime         time.Time
-	TimeZone        string
-	RepeatRule      string
-	DescriptionHTML string
-	IsAllDay        bool
 }
 
 // rfc3339 formats a timestamp the way PHP's date('c') does, with an explicit
@@ -115,9 +172,216 @@ func (s *Service) ListCalendars(ctx context.Context, customerID int64) ([]Calend
 	return calendars, rows.Err()
 }
 
-// ListMeetings returns the meetings in the given calendars between from and
-// until, grouped by calendar day. A meeting spanning several days appears under
-// each day it covers.
+// meetingRow is a g_meeting: the meeting's identity and organizer.
+type meetingRow struct {
+	id            int64
+	fedID         string
+	organizer     string
+	organizerName string
+}
+
+// revision is one g_meeting_revision: the whole meeting at one point.
+type revision struct {
+	id          int64
+	number      int
+	status      string
+	title       string
+	description string
+	html        string
+	start, end  time.Time
+	timeZone    string
+	allDay      bool
+	repeat      *rrule.Repeat
+	overrides   []rrule.Override
+}
+
+// series is the revision's timing, ready to expand.
+func (r *revision) series() (rrule.Series, error) {
+	loc, err := time.LoadLocation(r.timeZone)
+	if err != nil {
+		return rrule.Series{}, fmt.Errorf("time zone of meeting revision %d: %w", r.id, err)
+	}
+	return rrule.Series{Start: r.start, End: r.end, Location: loc, AllDay: r.allDay,
+		Repeat: r.repeat, Overrides: r.overrides}, nil
+}
+
+// document is a g_meeting_document.
+type document struct {
+	id       int64
+	fedID    string
+	name     string
+	mime     string
+	size     int64
+	md5      string
+	sha256   string
+	revision int
+}
+
+func loadMeeting(ctx context.Context, q store.Queryer, gMeetingID int64) (*meetingRow, error) {
+	m := meetingRow{id: gMeetingID}
+	err := q.QueryRowContext(ctx,
+		`SELECT "federation_id", "organizer_email", "organizer_name" FROM "g_meeting" WHERE "id" = ? LIMIT 1`,
+		gMeetingID).Scan(&m.fedID, &m.organizer, &m.organizerName)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("look up meeting: %w", err)
+	}
+	return &m, nil
+}
+
+const revisionColumns = `"id", "revision", "status", "title", "description", "description_html", ` +
+	`"start_time", "end_time", "time_zone", "is_all_day", "repeat", "overrides"`
+
+func scanRevision(row interface{ Scan(...any) error }) (*revision, error) {
+	var r revision
+	var html, repeat, overrides sql.NullString
+	if err := row.Scan(&r.id, &r.number, &r.status, &r.title, &r.description, &html,
+		&r.start, &r.end, &r.timeZone, &r.allDay, &repeat, &overrides); err != nil {
+		return nil, err
+	}
+	r.html = html.String
+	r.start, r.end = r.start.UTC(), r.end.UTC()
+	if repeat.Valid && repeat.String != "" {
+		r.repeat = &rrule.Repeat{}
+		if err := json.Unmarshal([]byte(repeat.String), r.repeat); err != nil {
+			return nil, fmt.Errorf("read repeat of meeting revision %d: %w", r.id, err)
+		}
+	}
+	if overrides.Valid && overrides.String != "" {
+		if err := json.Unmarshal([]byte(overrides.String), &r.overrides); err != nil {
+			return nil, fmt.Errorf("read overrides of meeting revision %d: %w", r.id, err)
+		}
+	}
+	return &r, nil
+}
+
+// latestRevision is the highest revision held of a meeting, nil for none.
+func latestRevision(ctx context.Context, q store.Queryer, gMeetingID int64) (*revision, error) {
+	r, err := scanRevision(q.QueryRowContext(ctx,
+		`SELECT `+revisionColumns+` FROM "g_meeting_revision" WHERE "g_meeting_id" = ? `+
+			`ORDER BY "revision" DESC LIMIT 1`, gMeetingID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("look up meeting revision: %w", err)
+	}
+	return r, nil
+}
+
+func attendeesOf(ctx context.Context, q store.Queryer, revisionID int64) ([]string, error) {
+	attendees, err := store.SelectStrings(ctx, q,
+		`SELECT "email" FROM "g_meeting_attendee" WHERE "g_meeting_revision_id" = ? ORDER BY "id"`, revisionID)
+	if err != nil {
+		return nil, fmt.Errorf("list attendees: %w", err)
+	}
+	return attendees, nil
+}
+
+func documentsOf(ctx context.Context, q store.Queryer, revisionID int64) ([]document, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT "g_meeting_document"."id", "g_meeting_document"."federation_id", "g_meeting_document"."file_name", `+
+			`"g_meeting_document"."mime_type", "g_meeting_document"."file_size", "g_meeting_document"."hash_md5", `+
+			`"g_meeting_document"."hash_sha256", "g_meeting_revision"."revision" FROM "g_meeting_document" `+
+			`JOIN "g_meeting_revision" ON "g_meeting_revision"."id" = "g_meeting_document"."g_meeting_revision_id" `+
+			`WHERE "g_meeting_document"."g_meeting_revision_id" = ? ORDER BY "g_meeting_document"."id"`, revisionID)
+	if err != nil {
+		return nil, fmt.Errorf("list documents: %w", err)
+	}
+	defer rows.Close()
+	var out []document
+	for rows.Next() {
+		var d document
+		if err := rows.Scan(&d.id, &d.fedID, &d.name, &d.mime, &d.size, &d.md5, &d.sha256, &d.revision); err != nil {
+			return nil, fmt.Errorf("scan document: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// aliasesOf are the addresses a mailbox receives at, which is who its owner
+// is in a meeting.
+func aliasesOf(ctx context.Context, q store.Queryer, mailboxID int64) ([]string, error) {
+	aliases, err := store.SelectStrings(ctx, q,
+		`SELECT "email" FROM "alias" WHERE "mailbox_id" = ? ORDER BY "id"`, mailboxID)
+	if err != nil {
+		return nil, fmt.Errorf("list aliases: %w", err)
+	}
+	return aliases, nil
+}
+
+// view is a meeting as one mailbox is shown it. Someone the organizer removed
+// is shown the revision that removed them, as cancelled, and nothing later,
+// since their Domain receives no later revision (RFC 15.4).
+type view struct {
+	meeting   *meetingRow
+	revision  *revision
+	attendees []string
+	// self is the viewer's address in the meeting, removed whether the
+	// organizer took them out.
+	self    string
+	removed bool
+}
+
+func (s *Service) viewOf(ctx context.Context, q store.Queryer, gMeetingID int64, aliases []string) (*view, error) {
+	m, err := loadMeeting(ctx, q, gMeetingID)
+	if err != nil || m == nil {
+		return nil, err
+	}
+	latest, err := latestRevision(ctx, q, gMeetingID)
+	if err != nil || latest == nil {
+		return nil, err
+	}
+	attendees, err := attendeesOf(ctx, q, latest.id)
+	if err != nil {
+		return nil, err
+	}
+	v := &view{meeting: m, revision: latest, attendees: attendees}
+	for _, a := range aliases {
+		if contains(attendees, a) {
+			v.self = a
+			return v, nil
+		}
+	}
+	if len(aliases) == 0 {
+		return v, nil
+	}
+	// The last revision that still listed them, and the first after it,
+	// which is the one that removed them, or, when that one never arrived,
+	// the first that told this Domain they were out (RFC 15.4).
+	args := append([]any{gMeetingID}, stringArgs(aliases)...)
+	last, err := store.SelectInt(ctx, q,
+		`SELECT COALESCE(MAX("g_meeting_revision"."revision"), 0) FROM "g_meeting_revision" `+
+			`JOIN "g_meeting_attendee" ON "g_meeting_attendee"."g_meeting_revision_id" = "g_meeting_revision"."id" `+
+			`WHERE "g_meeting_revision"."g_meeting_id" = ? AND "g_meeting_attendee"."email" IN (`+
+			store.Placeholders(len(aliases))+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("look up removal: %w", err)
+	}
+	v.removed = true
+	if last == 0 {
+		return v, nil
+	}
+	shown, err := scanRevision(q.QueryRowContext(ctx,
+		`SELECT `+revisionColumns+` FROM "g_meeting_revision" WHERE "g_meeting_id" = ? AND "revision" > ? `+
+			`ORDER BY "revision" LIMIT 1`, gMeetingID, last))
+	if err != nil {
+		return nil, fmt.Errorf("look up the revision that removed them: %w", err)
+	}
+	v.revision = shown
+	if v.attendees, err = attendeesOf(ctx, q, shown.id); err != nil {
+		return nil, err
+	}
+	v.self = aliases[0]
+	return v, nil
+}
+
+// ListMeetings returns the occurrences in the given calendars that start
+// between from and until, grouped by calendar day. An occurrence spanning
+// several days appears under each day it covers.
 func (s *Service) ListMeetings(ctx context.Context, customerID int64, calendarIDs []int64,
 	from, until time.Time) (map[string][]Meeting, error) {
 	days := map[string][]Meeting{}
@@ -128,47 +392,65 @@ func (s *Service) ListMeetings(ctx context.Context, customerID int64, calendarID
 		return days, nil
 	}
 
-	in := store.Placeholders(len(calendarIDs))
-	args := append([]any{customerID, from, until}, store.Args(calendarIDs)...)
+	// Only meetings with a revision that can fall in the range are read and
+	// expanded (ADR 22).
+	args := append([]any{customerID, until, from}, store.Args(calendarIDs)...)
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT "meeting"."id", "meeting"."mailbox_id", "meeting"."will_attend", `+
-			`"g_meeting"."title", "g_meeting"."start_time", "g_meeting"."end_time", `+
-			`"g_meeting"."time_zone", "g_meeting"."is_all_day", "g_meeting"."organizer_email", `+
-			`"g_meeting"."organizer_name", "g_meeting"."description" FROM "meeting" `+
-			`JOIN "g_meeting" ON "meeting"."g_meeting_id" = "g_meeting"."id" `+
-			`WHERE "meeting"."customer_id" = ? AND "g_meeting"."start_time" >= ? `+
-			`AND "g_meeting"."start_time" < ? AND "meeting"."mailbox_id" IN (`+in+") "+
-			`ORDER BY "g_meeting"."start_time"`, args...)
+		`SELECT "meeting"."id", "meeting"."mailbox_id", "meeting"."g_meeting_id", "meeting"."seen_revision" `+
+			`FROM "meeting" WHERE "meeting"."customer_id" = ? AND "meeting"."deleted_at" IS NULL `+
+			`AND EXISTS (SELECT 1 FROM "g_meeting_revision" WHERE "g_meeting_revision"."g_meeting_id" = "meeting"."g_meeting_id" `+
+			`AND "g_meeting_revision"."first_start" < ? AND ("g_meeting_revision"."last_end" IS NULL `+
+			`OR "g_meeting_revision"."last_end" > ?)) `+
+			`AND "meeting"."mailbox_id" IN (`+store.Placeholders(len(calendarIDs))+`) ORDER BY "meeting"."id"`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list meetings: %w", err)
 	}
-	defer rows.Close()
+	type projection struct {
+		id, mailboxID, gMeetingID int64
+		seen                      int
+	}
+	var projections []projection
+	for rows.Next() {
+		var p projection
+		if err := rows.Scan(&p.id, &p.mailboxID, &p.gMeetingID, &p.seen); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan meeting: %w", err)
+		}
+		projections = append(projections, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list meetings: %w", err)
+	}
 
 	type span struct {
 		meeting    Meeting
 		start, end time.Time
 	}
 	var spans []span
-	for rows.Next() {
-		var m Meeting
-		var willAttend sql.NullString
-		var start, end time.Time
-		if err := rows.Scan(&m.MeetingID, &m.CalendarID, &willAttend, &m.Title, &start, &end,
-			&m.TimeZone, &m.IsAllDay, &m.OrganizerEmail, &m.OrganizerName, &m.Description); err != nil {
-			return nil, fmt.Errorf("scan meeting: %w", err)
+	aliases := map[int64][]string{}
+	for _, p := range projections {
+		if _, ok := aliases[p.mailboxID]; !ok {
+			if aliases[p.mailboxID], err = aliasesOf(ctx, s.db, p.mailboxID); err != nil {
+				return nil, err
+			}
 		}
-		if willAttend.Valid {
-			v := willAttend.String
-			m.WillAttend = &v
+		v, err := s.viewOf(ctx, s.db, p.gMeetingID, aliases[p.mailboxID])
+		if err != nil {
+			return nil, err
 		}
-		m.StartTime = rfc3339(start)
-		m.EndTime = rfc3339(end)
-		m.WidthFraction = 1
-		spans = append(spans, span{meeting: m, start: start, end: end})
+		if v == nil {
+			continue
+		}
+		occurrences, err := s.occurrencesOf(ctx, v, p.id, p.mailboxID, p.seen, from, until)
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range occurrences {
+			spans = append(spans, span{meeting: o.meeting, start: o.start, end: o.end})
+		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list meetings: %w", err)
-	}
+	sort.SliceStable(spans, func(i, j int) bool { return spans[i].start.Before(spans[j].start) })
 
 	for day := range days {
 		dayStart, err := time.ParseInLocation("2006-01-02", day, time.UTC)
@@ -196,6 +478,97 @@ func (s *Service) ListMeetings(ctx context.Context, customerID int64, calendarID
 		days[day] = todays
 	}
 	return days, nil
+}
+
+type listed struct {
+	meeting    Meeting
+	start, end time.Time
+}
+
+// occurrencesOf expands one meeting as one viewer sees it, keeping the
+// occurrences that start in [from, until).
+func (s *Service) occurrencesOf(ctx context.Context, v *view, projectionID, mailboxID int64, seen int,
+	from, until time.Time) ([]listed, error) {
+	r := v.revision
+	series, err := r.series()
+	if err != nil {
+		return nil, err
+	}
+	answers, err := answersOf(ctx, s.db, v.meeting.id)
+	if err != nil {
+		return nil, err
+	}
+	docs, err := documentsOf(ctx, s.db, r.id)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]DocumentRef, 0, len(docs))
+	for _, d := range docs {
+		refs = append(refs, DocumentRef{DocumentID: d.id, FileName: d.name, MimeType: d.mime, FileSize: d.size})
+	}
+	isOrganizer := strings.EqualFold(v.self, v.meeting.organizer) && !v.removed
+
+	var out []listed
+	for _, o := range series.Expand(until) {
+		if o.Start.Before(from) {
+			continue
+		}
+		m := Meeting{
+			MeetingID:      projectionID,
+			Occurrence:     o.Key,
+			CalendarID:     mailboxID,
+			Title:          r.title,
+			StartTime:      rfc3339(o.Start),
+			EndTime:        rfc3339(o.End),
+			TimeZone:       r.timeZone,
+			IsAllDay:       r.allDay,
+			OrganizerEmail: v.meeting.organizer,
+			OrganizerName:  v.meeting.organizerName,
+			Description:    r.description,
+			Status:         r.status,
+			Revision:       r.number,
+			Unseen:         seen < r.number,
+			IsOrganizer:    isOrganizer,
+			Repeat:         r.repeat,
+			RepeatText:     r.repeat.HumanReadable(),
+			Documents:      refs,
+		}
+		if ov := o.Override; ov != nil {
+			if ov.Status != "" && m.Status != federation.StatusCancelled {
+				m.Status = ov.Status
+			}
+			if ov.Title != nil {
+				m.Title = *ov.Title
+			}
+			if ov.Description != nil {
+				m.Description = *ov.Description
+			}
+		}
+		if v.removed {
+			m.Status = federation.StatusCancelled
+		}
+		for _, email := range v.attendees {
+			a := Attendee{Email: email}
+			if strings.EqualFold(email, v.meeting.organizer) {
+				// The organizer attends their own meeting (RFC 15.5).
+				yes := "yes"
+				a.WillAttend, a.Revision = &yes, r.number
+			} else if given, ok := answers.effective(email, o.Key); ok {
+				answer, at := given.answer, rfc3339(given.at)
+				a.WillAttend, a.Revision, a.AnsweredAt = &answer, given.revision, &at
+				a.Outdated = given.revision < r.number
+			}
+			m.Attendees = append(m.Attendees, a)
+			if strings.EqualFold(email, v.self) {
+				m.WillAttend = a.WillAttend
+			}
+		}
+		if m.Attendees == nil {
+			m.Attendees = []Attendee{}
+		}
+		out = append(out, listed{meeting: m, start: o.Start, end: o.End})
+	}
+	return out, nil
 }
 
 // widthFractions returns, for each range, the largest number of ranges that
@@ -273,293 +646,61 @@ func horizontalPositions(ranges [][2]int64) []int {
 	return out
 }
 
-// AddMeeting creates an event, expanding a recurrence rule into concrete
-// meetings, and gives every attendee a projection. It returns the organizer's
-// meeting projection id for the first occurrence.
-func (s *Service) AddMeeting(ctx context.Context, customerID, calendarID int64, in NewMeeting) (int64, error) {
-	rule, err := rrule.Parse(in.RepeatRule)
-	if err != nil {
-		return 0, fmt.Errorf("parse repeat rule: %w", err)
-	}
-	attendees := make([]string, len(in.Attendees))
-	for i, email := range in.Attendees {
-		attendees[i] = store.Address(email)
-	}
-	in.Attendees = attendees
-
-	var meetingID int64
-	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
-		organizer, err := senderIdentity(ctx, tx, customerID, calendarID)
-		if err != nil {
-			return err
-		}
-		if organizer.Email == "" {
-			return nil
-		}
-
-		humanReadable := rule.HumanReadable()
-		gScheduleID, err := store.Insert(ctx, tx,
-			`INSERT INTO "g_schedule" ("start_time", "end_time", "time_zone", "repeat_rule", `+
-				`"recurrence_dates", "exception_dates", "repeat_rule_human_readable") VALUES (?,?,?,?,?,?,?)`,
-			in.StartTime, in.EndTime, in.TimeZone, in.RepeatRule, "", "", humanReadable)
-		if err != nil {
-			return fmt.Errorf("create schedule: %w", err)
-		}
-
-		starts := []time.Time{in.StartTime}
-		if rule != nil {
-			// The PHP expands at most 100 occurrences; keeping that bound means
-			// an unbounded rule cannot fill the table.
-			starts = rule.Occurrences(in.StartTime, 100)
-			if len(starts) == 0 {
-				starts = []time.Time{in.StartTime}
-			}
-		}
-		duration := in.EndTime.Sub(in.StartTime)
-		description := mdconv.ToMarkdown(in.DescriptionHTML)
-
-		for i, start := range starts {
-			id, err := s.addOccurrence(ctx, tx, gScheduleID, organizer, in, start, start.Add(duration), description)
-			if err != nil {
-				return err
-			}
-			if i == 0 {
-				meetingID = id
-			}
-		}
-		return nil
-	})
-	return meetingID, err
-}
-
-func (s *Service) addOccurrence(ctx context.Context, tx *sql.Tx, gScheduleID int64,
-	organizer identity, in NewMeeting, start, end time.Time, description string) (int64, error) {
-	gMeetingID, err := store.Insert(ctx, tx,
-		`INSERT INTO "g_meeting" ("g_schedule", "title", "start_time", "end_time", "time_zone", `+
-			`"is_all_day", "organizer_email", "organizer_name", "description", "description_html", `+
-			`"created_at") VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		gScheduleID, in.Title, start, end, in.TimeZone, in.IsAllDay,
-		organizer.Email, organizer.Name, description, in.DescriptionHTML, s.db.Now())
-	if err != nil {
-		return 0, fmt.Errorf("create meeting: %w", err)
-	}
-
-	// The organizer attends their own meeting.
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO "g_attendee" ("g_meeting_id", "email", "will_attend") VALUES (?,?,'yes')`,
-		gMeetingID, organizer.Email); err != nil {
-		return 0, fmt.Errorf("add organizer as attendee: %w", err)
-	}
-	for _, email := range in.Attendees {
-		if email == "" || email == organizer.Email {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO "g_attendee" ("g_meeting_id", "email") VALUES (?,?)`,
-			gMeetingID, email); err != nil {
-			return 0, fmt.Errorf("add attendee %s: %w", email, err)
-		}
-	}
-
-	var meetingID int64
-	projected := map[int64]bool{}
-	for _, email := range append([]string{organizer.Email}, in.Attendees...) {
-		if email == "" {
-			continue
-		}
-		mailboxID, err := store.SelectInt(ctx, tx,
-			`SELECT "mailbox_id" FROM "alias" WHERE "email" = ? LIMIT 1`, email)
-		if err != nil {
-			return 0, fmt.Errorf("look up attendee mailbox: %w", err)
-		}
-		if mailboxID == 0 || projected[mailboxID] {
-			continue
-		}
-		projected[mailboxID] = true
-		attendeeCustomerID, err := store.SelectInt(ctx, tx,
-			`SELECT "customer_id" FROM "mailbox" WHERE "id" = ? LIMIT 1`, mailboxID)
-		if err != nil {
-			return 0, fmt.Errorf("look up attendee customer: %w", err)
-		}
-		if attendeeCustomerID == 0 {
-			continue
-		}
-
-		var scheduleID any
-		var willAttend any
-		if email == organizer.Email {
-			id, err := store.Insert(ctx, tx,
-				`INSERT INTO "schedule" ("customer_id", "g_schedule_id", "mailbox_id") VALUES (?,?,?)`,
-				attendeeCustomerID, gScheduleID, mailboxID)
-			if err != nil {
-				return 0, fmt.Errorf("create schedule projection: %w", err)
-			}
-			scheduleID = id
-			willAttend = "yes"
-		}
-		id, err := store.Insert(ctx, tx,
-			`INSERT INTO "meeting" ("customer_id", "g_meeting_id", "mailbox_id", "schedule_id", "will_attend") `+
-				"VALUES (?,?,?,?,?)",
-			attendeeCustomerID, gMeetingID, mailboxID, scheduleID, willAttend)
-		if err != nil {
-			return 0, fmt.Errorf("create meeting projection: %w", err)
-		}
-		if email == organizer.Email {
-			meetingID = id
-		}
-	}
-	return meetingID, nil
-}
-
-type identity struct {
-	Email string
-	Name  string
-}
-
-func senderIdentity(ctx context.Context, q store.Queryer, customerID, mailboxID int64) (identity, error) {
-	var id identity
-	err := q.QueryRowContext(ctx,
-		`SELECT "alias"."email", "alias"."name" FROM "mailbox" `+
-			`JOIN "alias" ON "alias"."id" = "mailbox"."default_alias_id" `+
-			`WHERE "mailbox"."customer_id" = ? AND "mailbox"."id" = ? LIMIT 1`,
-		customerID, mailboxID).Scan(&id.Email, &id.Name)
-	if err == sql.ErrNoRows {
-		return identity{}, nil
-	}
-	if err != nil {
-		return identity{}, fmt.Errorf("look up organizer alias: %w", err)
-	}
-	return id, nil
-}
-
-// SetRSVP records an attendee's response. It writes a new g_attendee row as the
-// audit trail and updates the projection to the effective answer.
-func (s *Service) SetRSVP(ctx context.Context, customerID, meetingID int64, willAttend string) (bool, error) {
-	switch willAttend {
-	case "yes", "no", "maybe":
-	default:
-		return false, nil
-	}
-	var ok bool
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		var gMeetingID, mailboxID int64
-		err := tx.QueryRowContext(ctx,
-			`SELECT "g_meeting_id", "mailbox_id" FROM "meeting" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
-			customerID, meetingID).Scan(&gMeetingID, &mailboxID)
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("look up meeting: %w", err)
-		}
-		attendee, err := senderIdentity(ctx, tx, customerID, mailboxID)
-		if err != nil {
-			return err
-		}
-		if attendee.Email == "" {
-			return nil
-		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE "meeting" SET "will_attend" = ? WHERE "customer_id" = ? AND "id" = ?`,
-			willAttend, customerID, meetingID); err != nil {
-			return fmt.Errorf("update rsvp projection: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO "g_attendee" ("g_meeting_id", "email", "will_attend") VALUES (?,?,?)`,
-			gMeetingID, attendee.Email, willAttend); err != nil {
-			return fmt.Errorf("record rsvp: %w", err)
-		}
-		ok = true
-		return nil
-	})
-	return ok, err
-}
-
-// DeleteMeeting removes the customer's projection of a meeting. The canonical
-// meeting stays for the other attendees.
+// DeleteMeeting hides a meeting from the customer. It is not an answer: they
+// stay an attendee, and a new revision brings the meeting back (RFC 15.7,
+// ADR 22).
 func (s *Service) DeleteMeeting(ctx context.Context, customerID, meetingID int64) (bool, error) {
 	n, err := store.Affected(ctx, s.db,
-		`DELETE FROM "meeting" WHERE "customer_id" = ? AND "id" = ?`, customerID, meetingID)
+		`UPDATE "meeting" SET "deleted_at" = ? WHERE "customer_id" = ? AND "id" = ? AND "deleted_at" IS NULL`,
+		s.db.Now(), customerID, meetingID)
 	if err != nil {
 		return false, fmt.Errorf("delete meeting: %w", err)
 	}
 	return n > 0, nil
 }
 
-// AddAttendee invites an address to a meeting and gives it a projection.
-func (s *Service) AddAttendee(ctx context.Context, customerID, meetingID int64, email string) (bool, error) {
-	email = store.Address(email)
-	var ok bool
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		gMeetingID, err := store.SelectInt(ctx, tx,
-			`SELECT "g_meeting_id" FROM "meeting" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
-			customerID, meetingID)
-		if err != nil {
-			return fmt.Errorf("look up meeting: %w", err)
-		}
-		if gMeetingID == 0 {
-			return nil
-		}
-		existing, err := store.SelectInt(ctx, tx,
-			`SELECT "id" FROM "g_attendee" WHERE "g_meeting_id" = ? AND "email" = ? LIMIT 1`,
-			gMeetingID, email)
-		if err != nil {
-			return fmt.Errorf("look up attendee: %w", err)
-		}
-		if existing == 0 {
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO "g_attendee" ("g_meeting_id", "email") VALUES (?,?)`,
-				gMeetingID, email); err != nil {
-				return fmt.Errorf("add attendee: %w", err)
-			}
-		}
-		mailboxID, err := store.SelectInt(ctx, tx,
-			`SELECT "mailbox_id" FROM "alias" WHERE "email" = ? LIMIT 1`, email)
-		if err != nil {
-			return fmt.Errorf("look up attendee mailbox: %w", err)
-		}
-		if mailboxID != 0 {
-			attendeeCustomerID, err := store.SelectInt(ctx, tx,
-				`SELECT "customer_id" FROM "mailbox" WHERE "id" = ? LIMIT 1`, mailboxID)
-			if err != nil {
-				return fmt.Errorf("look up attendee customer: %w", err)
-			}
-			present, err := store.SelectInt(ctx, tx,
-				`SELECT "id" FROM "meeting" WHERE "customer_id" = ? AND "g_meeting_id" = ? LIMIT 1`,
-				attendeeCustomerID, gMeetingID)
-			if err != nil {
-				return fmt.Errorf("look up meeting projection: %w", err)
-			}
-			if attendeeCustomerID != 0 && present == 0 {
-				if _, err := tx.ExecContext(ctx,
-					`INSERT INTO "meeting" ("customer_id", "g_meeting_id", "mailbox_id", "schedule_id") `+
-						"VALUES (?,?,?,NULL)",
-					attendeeCustomerID, gMeetingID, mailboxID); err != nil {
-					return fmt.Errorf("create meeting projection: %w", err)
-				}
-			}
-		}
-		ok = true
-		return nil
-	})
-	return ok, err
-}
-
-// GetDocument returns a meeting document, if the customer attends the meeting.
+// GetDocument returns a meeting document, if the customer is shown the
+// revision it belongs to or a later one.
 func (s *Service) GetDocument(ctx context.Context, customerID, documentID int64) (*Document, error) {
 	var d Document
 	var hash string
+	var gMeetingID int64
+	var docRevision int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT "g_document"."file_name", "g_document"."mime_type", "g_document"."file_size", `+
-			`"g_document"."hash_md5" FROM "g_document" `+
-			`JOIN "meeting" ON "meeting"."g_meeting_id" = "g_document"."g_meeting_id" `+
-			`WHERE "g_document"."id" = ? AND "meeting"."customer_id" = ? LIMIT 1`,
-		documentID, customerID).Scan(&d.FileName, &d.MimeType, &d.FileSize, &hash)
+		`SELECT "g_meeting_document"."file_name", "g_meeting_document"."mime_type", "g_meeting_document"."file_size", `+
+			`"g_meeting_document"."hash_md5", "g_meeting_revision"."g_meeting_id", "g_meeting_revision"."revision" `+
+			`FROM "g_meeting_document" JOIN "g_meeting_revision" `+
+			`ON "g_meeting_revision"."id" = "g_meeting_document"."g_meeting_revision_id" `+
+			`WHERE "g_meeting_document"."id" = ? LIMIT 1`, documentID).
+		Scan(&d.FileName, &d.MimeType, &d.FileSize, &hash, &gMeetingID, &docRevision)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("look up document: %w", err)
+	}
+	mailboxIDs, err := store.SelectInts(ctx, s.db,
+		`SELECT "mailbox_id" FROM "meeting" WHERE "customer_id" = ? AND "g_meeting_id" = ?`, customerID, gMeetingID)
+	if err != nil {
+		return nil, fmt.Errorf("look up meeting projection: %w", err)
+	}
+	visible := false
+	for _, mailboxID := range mailboxIDs {
+		aliases, err := aliasesOf(ctx, s.db, mailboxID)
+		if err != nil {
+			return nil, err
+		}
+		v, err := s.viewOf(ctx, s.db, gMeetingID, aliases)
+		if err != nil {
+			return nil, err
+		}
+		if v != nil && v.revision.number >= docRevision {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		return nil, nil
 	}
 	data, err := s.blob.Get(hash)
 	if err != nil {
@@ -569,48 +710,21 @@ func (s *Service) GetDocument(ctx context.Context, customerID, documentID int64)
 	return &d, nil
 }
 
-// AddDocument attaches a file to a meeting.
-func (s *Service) AddDocument(ctx context.Context, customerID, meetingID int64,
-	fileName, mimeType string, data []byte) (int64, error) {
-	gMeetingID, err := store.SelectInt(ctx, s.db,
-		`SELECT "g_meeting_id" FROM "meeting" WHERE "customer_id" = ? AND "id" = ? LIMIT 1`,
-		customerID, meetingID)
-	if err != nil {
-		return 0, fmt.Errorf("look up meeting: %w", err)
+func contains(list []string, address string) bool {
+	for _, a := range list {
+		if strings.EqualFold(a, address) {
+			return true
+		}
 	}
-	if gMeetingID == 0 {
-		return 0, nil
-	}
-	hash, err := s.blob.Put(data)
-	if err != nil {
-		return 0, err
-	}
-	id, err := store.Insert(ctx, s.db,
-		`INSERT INTO "g_document" ("g_meeting_id", "file_name", "mime_type", "file_size", "hash_md5") `+
-			"VALUES (?,?,?,?,?)",
-		gMeetingID, fileName, mimeType, len(data), hash)
-	if err != nil {
-		return 0, fmt.Errorf("create document: %w", err)
-	}
-	return id, nil
+	return false
 }
 
-// DeleteDocument removes a document, if the customer attends its meeting.
-func (s *Service) DeleteDocument(ctx context.Context, customerID, documentID int64) (bool, error) {
-	gMeetingID, err := store.SelectInt(ctx, s.db,
-		`SELECT "g_document"."g_meeting_id" FROM "g_document" `+
-			`JOIN "meeting" ON "meeting"."g_meeting_id" = "g_document"."g_meeting_id" `+
-			`WHERE "g_document"."id" = ? AND "meeting"."customer_id" = ? LIMIT 1`,
-		documentID, customerID)
-	if err != nil {
-		return false, fmt.Errorf("look up document: %w", err)
+func without(list []string, drop []string) []string {
+	out := make([]string, 0, len(list))
+	for _, a := range list {
+		if !contains(drop, a) {
+			out = append(out, a)
+		}
 	}
-	if gMeetingID == 0 {
-		return false, nil
-	}
-	n, err := store.Affected(ctx, s.db, `DELETE FROM "g_document" WHERE "id" = ?`, documentID)
-	if err != nil {
-		return false, fmt.Errorf("delete document: %w", err)
-	}
-	return n > 0, nil
+	return out
 }

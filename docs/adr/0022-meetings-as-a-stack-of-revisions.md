@@ -1,6 +1,6 @@
 # 22. Meetings as a stack of revisions
 
-Status: proposed
+Status: accepted
 Date: 2026-10-25
 Source: `../webmail-federation/project_rfc.md` (§15)
 
@@ -115,6 +115,22 @@ another Domain is a meeting whose revisions happen not to leave the Server.
   own becomes an override, each `g_attendee` row becomes a `g_meeting_attendee`
   and, with its answer, a `g_meeting_rsvp`, and `g_document` becomes
   `g_meeting_document`. This belongs to the M2 migration rehearsal.
-- When this is built, ADR 3 (canonical table list), ADR 8 (recurrence and
-  single occurrences) and ADR 14 (RRULE subset) are edited to match, and this
-  ADR becomes accepted.
+- ADR 3 (canonical table list), ADR 8 (recurrence and single occurrences) and
+  ADR 14 (RRULE subset) are edited to match.
+
+## As built
+
+- `g_meeting_document` keeps `hash_md5`, the key of the blob store, and adds
+  `federation_id` and `hash_sha256`, which the envelope names a document by.
+- Revisions arrive with no time of change, so for a revision received from
+  another Domain `changed_at` is when it was stored here.
+- A removed attendee is shown the first revision held after the last one that
+  listed them: the one that removed them, or, when that one never arrived, the
+  first that told their Domain they were out (RFC 15.4).
+- Inviting someone on another Domain waits up to five seconds on its
+  descriptor, in the request, because RFC 15.1 asks for the organizer to be
+  told at once. A Domain that cannot be discovered then is treated as no
+  Webmail Domain, and the address is not invited.
+- A queued revision or answer is marked `superseded` in the outbox when a
+  later one for the same peer replaces it, which is also how a backfill sends
+  only the latest revision (RFC 15.3).

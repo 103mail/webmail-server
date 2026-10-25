@@ -492,63 +492,10 @@ func (s *Service) Bounce(ctx context.Context, b federation.BounceNotice) error {
 		body += fmt.Sprintf("\nIt will be sent again when %s can be reached.\n", b.PeerDomain)
 	}
 
-	senderEmail := store.Address(b.SenderEmail)
 	now := s.db.Now()
-	bounceFedID, err := federation.NewUUID()
-	if err != nil {
-		return err
-	}
 	return s.db.Tx(ctx, func(tx *sql.Tx) error {
-		mailboxID, err := store.SelectInt(ctx, tx,
-			`SELECT "mailbox_id" FROM "alias" WHERE "email" = ? LIMIT 1`, senderEmail)
-		if err != nil {
-			return fmt.Errorf("look up bounce recipient: %w", err)
-		}
-		if mailboxID == 0 {
-			return fmt.Errorf("cannot bounce to %s: no mailbox", b.SenderEmail)
-		}
-		folderID, err := store.SelectInt(ctx, tx,
-			`SELECT "default_folder_id" FROM "mailbox" WHERE "id" = ? LIMIT 1`, mailboxID)
-		if err != nil {
-			return fmt.Errorf("look up bounce folder: %w", err)
-		}
-		customerID, err := store.SelectInt(ctx, tx,
-			`SELECT "customer_id" FROM "folder" WHERE "id" = ? LIMIT 1`, folderID)
-		if err != nil {
-			return fmt.Errorf("look up bounce customer: %w", err)
-		}
-		if folderID == 0 || customerID == 0 {
-			return fmt.Errorf("cannot bounce to %s: no folder", b.SenderEmail)
-		}
-
-		gThreadID, err := store.Insert(ctx, tx,
-			`INSERT INTO "g_thread" ("subject_line", "body_summary") VALUES (?,?)`,
-			truncate("Delivery failed: "+b.Subject, 255), mdconv.Summary(body))
-		if err != nil {
-			return fmt.Errorf("create bounce thread: %w", err)
-		}
-		gMessageID, err := store.Insert(ctx, tx,
-			`INSERT INTO "g_message" ("g_thread_id", "sender_email", "sender_name", "body", `+
-				`"created_at", "sent_at", "federation_id") VALUES (?,?,?,?,?,?,?)`,
-			gThreadID, "mailer-daemon@"+b.OriginDomain, "Mailer Daemon", body, now, now, bounceFedID)
-		if err != nil {
-			return fmt.Errorf("create bounce message: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO "g_subscription" ("g_thread_id", "email") VALUES (?,?) ON CONFLICT DO NOTHING`,
-			gThreadID, senderEmail); err != nil {
-			return fmt.Errorf("subscribe bounce recipient: %w", err)
-		}
-		threadID, err := store.Insert(ctx, tx,
-			`INSERT INTO "thread" ("customer_id", "folder_id", "g_thread_id") VALUES (?,?,?)`,
-			customerID, folderID, gThreadID)
-		if err != nil {
-			return fmt.Errorf("create bounce thread projection: %w", err)
-		}
-		if _, err := store.Insert(ctx, tx,
-			`INSERT INTO "message" ("customer_id", "thread_id", "g_message_id") VALUES (?,?,?)`,
-			customerID, threadID, gMessageID); err != nil {
-			return fmt.Errorf("create bounce message projection: %w", err)
+		if err := s.writeNotice(ctx, tx, b.OriginDomain, b.SenderEmail, "Delivery failed: "+b.Subject, body); err != nil {
+			return err
 		}
 
 		// Recipients that do not exist did not receive the message and are not
@@ -569,6 +516,78 @@ func (s *Service) Bounce(ctx context.Context, b federation.BounceNotice) error {
 		}
 		return nil
 	})
+}
+
+// Notice writes a message from mailer-daemon into one person's own inbox.
+// Like a bounce it is local and never leaves this Server: it is how the
+// calendar tells an organizer who an invitation cannot reach (RFC 15.1, 15.4).
+func (s *Service) Notice(ctx context.Context, originDomain, recipient, subject, body string) error {
+	return s.db.Tx(ctx, func(tx *sql.Tx) error {
+		return s.writeNotice(ctx, tx, originDomain, recipient, subject, body)
+	})
+}
+
+// writeNotice is a new thread from mailer-daemon@{originDomain} in the
+// recipient's inbox, with only them on it.
+func (s *Service) writeNotice(ctx context.Context, tx *sql.Tx, originDomain, recipient, subject, body string) error {
+	recipient = store.Address(recipient)
+	now := s.db.Now()
+	fedID, err := federation.NewUUID()
+	if err != nil {
+		return err
+	}
+	mailboxID, err := store.SelectInt(ctx, tx,
+		`SELECT "mailbox_id" FROM "alias" WHERE "email" = ? LIMIT 1`, recipient)
+	if err != nil {
+		return fmt.Errorf("look up bounce recipient: %w", err)
+	}
+	if mailboxID == 0 {
+		return fmt.Errorf("cannot bounce to %s: no mailbox", recipient)
+	}
+	folderID, err := store.SelectInt(ctx, tx,
+		`SELECT "default_folder_id" FROM "mailbox" WHERE "id" = ? LIMIT 1`, mailboxID)
+	if err != nil {
+		return fmt.Errorf("look up bounce folder: %w", err)
+	}
+	customerID, err := store.SelectInt(ctx, tx,
+		`SELECT "customer_id" FROM "folder" WHERE "id" = ? LIMIT 1`, folderID)
+	if err != nil {
+		return fmt.Errorf("look up bounce customer: %w", err)
+	}
+	if folderID == 0 || customerID == 0 {
+		return fmt.Errorf("cannot bounce to %s: no folder", recipient)
+	}
+
+	gThreadID, err := store.Insert(ctx, tx,
+		`INSERT INTO "g_thread" ("subject_line", "body_summary") VALUES (?,?)`,
+		truncate(subject, 255), mdconv.Summary(body))
+	if err != nil {
+		return fmt.Errorf("create bounce thread: %w", err)
+	}
+	gMessageID, err := store.Insert(ctx, tx,
+		`INSERT INTO "g_message" ("g_thread_id", "sender_email", "sender_name", "body", `+
+			`"created_at", "sent_at", "federation_id") VALUES (?,?,?,?,?,?,?)`,
+		gThreadID, "mailer-daemon@"+originDomain, "Mailer Daemon", body, now, now, fedID)
+	if err != nil {
+		return fmt.Errorf("create bounce message: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO "g_subscription" ("g_thread_id", "email") VALUES (?,?) ON CONFLICT DO NOTHING`,
+		gThreadID, recipient); err != nil {
+		return fmt.Errorf("subscribe bounce recipient: %w", err)
+	}
+	threadID, err := store.Insert(ctx, tx,
+		`INSERT INTO "thread" ("customer_id", "folder_id", "g_thread_id") VALUES (?,?,?)`,
+		customerID, folderID, gThreadID)
+	if err != nil {
+		return fmt.Errorf("create bounce thread projection: %w", err)
+	}
+	if _, err := store.Insert(ctx, tx,
+		`INSERT INTO "message" ("customer_id", "thread_id", "g_message_id") VALUES (?,?,?)`,
+		customerID, threadID, gMessageID); err != nil {
+		return fmt.Errorf("create bounce message projection: %w", err)
+	}
+	return nil
 }
 
 // truncate shortens v to at most n characters. It counts runes, not bytes,

@@ -333,6 +333,9 @@ type Service struct {
 	// chats is nil on a Server without the chat domain, which then neither
 	// advertises chat nor accepts it (RFC 14.1).
 	chats ChatDeliverer
+	// calendar is nil on a Server without the calendar domain, which then
+	// neither advertises calendar nor accepts meetings (RFC 15.1).
+	calendar CalendarDeliverer
 
 	// reachable reports whether a peer answers, which is when it is backfilled
 	// (RFC 6.4). Tests replace it; it is fetchDescriptor otherwise.
@@ -465,7 +468,7 @@ func (s *Service) AttachChat(c ChatDeliverer) { s.chats = c }
 // Versions are the protocol versions this Server speaks: 0.2, and 0.3 when
 // it does chat (RFC 10, 14.1).
 func (s *Service) Versions() []string {
-	if s.chats == nil {
+	if s.chats == nil && s.calendar == nil {
 		return []string{Version}
 	}
 	return []string{Version, ChatVersion}
@@ -518,6 +521,7 @@ func (s *Service) DescriptorFor(domain string) (*Descriptor, bool) {
 		Versions:           s.Versions(),
 		Registrar:          false,
 		Chat:               s.chats != nil,
+		Calendar:           s.calendar != nil,
 		MaxEnvelopeBytes:   s.cfg.MaxEnvelopeBytes,
 		MaxAttachmentBytes: s.cfg.MaxAttachmentBytes,
 	}, true
@@ -608,16 +612,16 @@ func (s *Service) Peer(ctx context.Context, domain string, force bool) (*Descrip
 func (s *Service) cachedPeer(ctx context.Context, domain string) (*Descriptor, time.Time, time.Time, error) {
 	var (
 		publicKey, previous, versions string
-		registrar                     bool
+		registrar, chat, calendar     bool
 		envelopeCap, attachmentCap    int64
 		discoveredAt, failedAt        sql.NullTime
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT "public_key", "previous_public_keys", "versions", "is_registrar", `+
-			`"max_envelope_bytes", "max_attachment_bytes", "discovered_at", "discovery_failed_at" `+
-			`FROM "domain" WHERE "name" = ? AND "is_local" = FALSE LIMIT 1`, domain).
+			`"max_envelope_bytes", "max_attachment_bytes", "discovered_at", "discovery_failed_at", `+
+			`"has_chat", "has_calendar" FROM "domain" WHERE "name" = ? AND "is_local" = FALSE LIMIT 1`, domain).
 		Scan(&publicKey, &previous, &versions, &registrar, &envelopeCap, &attachmentCap,
-			&discoveredAt, &failedAt)
+			&discoveredAt, &failedAt, &chat, &calendar)
 	if err == sql.ErrNoRows {
 		return nil, time.Time{}, time.Time{}, nil
 	}
@@ -635,6 +639,8 @@ func (s *Service) cachedPeer(ctx context.Context, domain string) (*Descriptor, t
 		Registrar:          registrar,
 		MaxEnvelopeBytes:   envelopeCap,
 		MaxAttachmentBytes: attachmentCap,
+		Chat:               chat,
+		Calendar:           calendar,
 	}, discoveredAt.Time, failedAt.Time, nil
 }
 
@@ -644,15 +650,16 @@ func (s *Service) cachedPeer(ctx context.Context, domain string) (*Descriptor, t
 func (s *Service) storePeer(ctx context.Context, d *Descriptor) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO "domain" ("name", "is_local", "public_key", "previous_public_keys", "versions", `+
-			`"is_registrar", "max_envelope_bytes", "max_attachment_bytes", "discovered_at") `+
-			"VALUES (?,FALSE,?,?,?,?,?,?,?) "+
+			`"is_registrar", "max_envelope_bytes", "max_attachment_bytes", "discovered_at", "has_chat", "has_calendar") `+
+			"VALUES (?,FALSE,?,?,?,?,?,?,?,?,?) "+
 			`ON CONFLICT ("name") DO UPDATE SET "public_key" = "excluded"."public_key", `+
 			`"previous_public_keys" = "excluded"."previous_public_keys", "versions" = "excluded"."versions", `+
 			`"is_registrar" = "excluded"."is_registrar", "max_envelope_bytes" = "excluded"."max_envelope_bytes", `+
 			`"max_attachment_bytes" = "excluded"."max_attachment_bytes", `+
-			`"discovered_at" = "excluded"."discovered_at", "discovery_failed_at" = NULL`,
+			`"discovered_at" = "excluded"."discovered_at", "discovery_failed_at" = NULL, `+
+			`"has_chat" = "excluded"."has_chat", "has_calendar" = "excluded"."has_calendar"`,
 		d.Domain, d.PublicKey, strings.Join(d.PreviousPublicKeys, ","), strings.Join(d.Versions, ","),
-		d.Registrar, d.EnvelopeCap(), d.AttachmentCap(), s.db.Now())
+		d.Registrar, d.EnvelopeCap(), d.AttachmentCap(), s.db.Now(), d.Chat, d.Calendar)
 	if err != nil {
 		return fmt.Errorf("cache peer %s: %w", d.Domain, err)
 	}

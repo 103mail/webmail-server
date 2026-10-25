@@ -1263,3 +1263,31 @@ func TestAttachmentsOverTheLimitAreRefused(t *testing.T) {
 		t.Errorf("%d messages were written", n)
 	}
 }
+
+// A notice is a thread from mailer-daemon in one person's inbox, with only
+// them on it, as the calendar uses to tell an organizer who an invitation
+// did not reach (RFC 15.1). Nothing is queued for another Domain.
+func TestNoticeIsLocal(t *testing.T) {
+	f := federatedFixture(t)
+	alice, _, aliceInbox := f.account("alice@example.test", "Alice")
+	if err := f.svc.Notice(f.ctx, "example.test", "Alice@example.test", "Invitation failed: Launch",
+		"frank@nocal.test could not be invited."); err != nil {
+		t.Fatal(err)
+	}
+	threads, err := f.svc.ListThreads(f.ctx, alice, aliceInbox, "")
+	if err != nil || len(threads) != 1 {
+		t.Fatalf("Alice has %d threads, %v", len(threads), err)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "g_message" WHERE "sender_email" = 'mailer-daemon@example.test'`); n != 1 {
+		t.Errorf("%d messages from mailer-daemon, want 1", n)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "g_subscription"`); n != 1 {
+		t.Errorf("%d subscriptions, want Alice's alone", n)
+	}
+	if n := f.count(`SELECT COUNT(*) FROM "federation_outbox"`); n != 0 {
+		t.Errorf("a notice queued %d envelopes", n)
+	}
+	if err := f.svc.Notice(f.ctx, "example.test", "nobody@example.test", "x", "y"); err == nil {
+		t.Error("a notice for someone with no mailbox was written")
+	}
+}

@@ -1,9 +1,11 @@
-// Package rrule expands the recurrence rules stored in g_schedule.repeat_rule.
+// Package rrule expands the recurrence of a meeting: the JSON of RFC 15.6
+// that a meeting stores and sends between Domains (repeat.go, ADR 22).
 //
-// It implements the subset of RFC 5545 that the calendar UI produces: FREQ of
-// DAILY, WEEKLY, MONTHLY or YEARLY, with INTERVAL, COUNT, UNTIL, BYDAY and
-// BYMONTHDAY. Parts outside that subset are reported by Parse rather than
-// silently ignored, so a rule is never expanded into the wrong dates.
+// It also reads the RRULE the calendar API takes, the subset of RFC 5545 that
+// the calendar UI produces: FREQ of DAILY, WEEKLY, MONTHLY or YEARLY, with
+// INTERVAL, COUNT, UNTIL, BYDAY and BYMONTHDAY. Parts outside that subset are
+// reported by Parse rather than silently ignored, and FromRule turns the rest
+// into the JSON form, so a rule is never expanded into the wrong dates.
 package rrule
 
 import (
@@ -158,172 +160,6 @@ func parseUntil(v string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("invalid UNTIL %q", v)
-}
-
-// Occurrences returns up to limit start times at or after dtstart. Expansion
-// stops at COUNT, UNTIL or limit, whichever comes first.
-func (r *Rule) Occurrences(dtstart time.Time, limit int) []time.Time {
-	if r == nil || limit <= 0 {
-		return nil
-	}
-	var out []time.Time
-	// Bound the walk so a rule that matches nothing cannot spin forever.
-	const maxSteps = 100000
-	seen := 0
-	for cursor, steps := dtstart, 0; steps < maxSteps; steps++ {
-		if len(out) >= limit {
-			break
-		}
-		if r.Count > 0 && seen >= r.Count {
-			break
-		}
-		if !r.Until.IsZero() && cursor.After(r.Until) {
-			break
-		}
-		if r.matches(cursor, dtstart) {
-			seen++
-			out = append(out, cursor)
-		}
-		cursor = r.step(cursor, dtstart)
-		if cursor.IsZero() {
-			break
-		}
-	}
-	return out
-}
-
-// matches reports whether a candidate satisfies the BY* parts.
-func (r *Rule) matches(t, dtstart time.Time) bool {
-	if len(r.ByDay) > 0 {
-		found := false
-		for _, wd := range r.ByDay {
-			if t.Weekday() == wd {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	if len(r.ByMonthDay) > 0 {
-		last := daysInMonth(t.Year(), t.Month())
-		found := false
-		for _, d := range r.ByMonthDay {
-			day := d
-			if day < 0 {
-				day = last + 1 + day
-			}
-			if t.Day() == day {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	// For weekly rules with BYDAY the interval applies to whole weeks, so a
-	// candidate in a skipped week is not an occurrence.
-	if r.Freq == Weekly && r.Interval > 1 {
-		if weeksBetween(dtstart, t)%r.Interval != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-// step advances the cursor to the next candidate instant.
-func (r *Rule) step(t, dtstart time.Time) time.Time {
-	switch r.Freq {
-	case Daily:
-		return t.AddDate(0, 0, r.Interval)
-	case Weekly:
-		if len(r.ByDay) > 0 {
-			// Walk day by day; matches() filters to the selected weekdays and
-			// applies the week interval.
-			return t.AddDate(0, 0, 1)
-		}
-		return t.AddDate(0, 0, 7*r.Interval)
-	case Monthly:
-		if len(r.ByMonthDay) > 0 || len(r.ByDay) > 0 {
-			return t.AddDate(0, 0, 1)
-		}
-		return addMonths(t, r.Interval, dtstart.Day())
-	case Yearly:
-		return t.AddDate(r.Interval, 0, 0)
-	}
-	return time.Time{}
-}
-
-// addMonths advances by n months, clamping to the last day of the target month
-// so that the 31st does not roll into the next month.
-func addMonths(t time.Time, n, preferredDay int) time.Time {
-	year, month := t.Year(), int(t.Month())+n
-	year += (month - 1) / 12
-	month = (month-1)%12 + 1
-	if month < 1 {
-		month += 12
-		year--
-	}
-	day := preferredDay
-	if last := daysInMonth(year, time.Month(month)); day > last {
-		day = last
-	}
-	return time.Date(year, time.Month(month), day, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
-}
-
-func daysInMonth(year int, month time.Month) int {
-	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
-}
-
-// weeksBetween counts whole weeks between two instants, measured from the
-// Monday of each week so that a rule does not shift across a week boundary.
-func weeksBetween(a, b time.Time) int {
-	startA := startOfWeek(a)
-	startB := startOfWeek(b)
-	return int(startB.Sub(startA).Hours() / (24 * 7))
-}
-
-func startOfWeek(t time.Time) time.Time {
-	day := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-	offset := (int(day.Weekday()) + 6) % 7 // Monday as the first day
-	return day.AddDate(0, 0, -offset)
-}
-
-// HumanReadable renders the rule as the sentence stored in
-// g_schedule.repeat_rule_human_readable.
-func (r *Rule) HumanReadable() string {
-	if r == nil {
-		return ""
-	}
-	var b strings.Builder
-	if r.Interval == 1 {
-		b.WriteString(r.Freq.String())
-	} else {
-		b.WriteString("every " + strconv.Itoa(r.Interval) + " " + plural(r.Freq))
-	}
-	if len(r.ByDay) > 0 {
-		names := make([]string, len(r.ByDay))
-		for i, wd := range r.ByDay {
-			names[i] = wd.String()
-		}
-		b.WriteString(" on " + joinWords(names))
-	}
-	if len(r.ByMonthDay) > 0 {
-		days := make([]string, len(r.ByMonthDay))
-		for i, d := range r.ByMonthDay {
-			days[i] = ordinal(d)
-		}
-		b.WriteString(" on the " + joinWords(days))
-	}
-	switch {
-	case r.Count > 0:
-		b.WriteString(", " + strconv.Itoa(r.Count) + " times")
-	case !r.Until.IsZero():
-		b.WriteString(", until " + r.Until.Format("2 January 2006"))
-	}
-	return b.String()
 }
 
 func plural(f Frequency) string {

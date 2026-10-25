@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/103mail/webmail-server/internal/blob"
+	"github.com/103mail/webmail-server/internal/calendar"
 	"github.com/103mail/webmail-server/internal/chat"
 	"github.com/103mail/webmail-server/internal/config"
 	"github.com/103mail/webmail-server/internal/email"
@@ -102,6 +103,13 @@ func run(log *slog.Logger) error {
 	// And the chat domain, to record what peers accepted and to tell a sender
 	// in the chat when a message did not arrive.
 	fed.AttachChat(chat.New(db, attachments))
+	// And the calendar domain, to drop attendees a peer refused or that are
+	// on a Domain without calendar, with a new revision, and to tell the
+	// organizer (RFC 15.1, 15.4).
+	meetings := calendar.New(db, blob.New(filepath.Join(cfg.DataDir, "documents")))
+	meetings.NotifyBy(mail)
+	meetings.Federate(fed)
+	fed.AttachCalendar(meetings)
 
 	interval := defaultInterval
 	if v := os.Getenv("WEBMAIL_WORKER_INTERVAL_SECONDS"); v != "" {

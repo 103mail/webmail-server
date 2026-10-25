@@ -3,8 +3,8 @@
 Go backend for the webmail platform. It replaces the server side of the PHP
 monolith at `../webmail-legacy` and serves the API the client runs on. It also
 implements the Basic tier of the federation RFC (ADR 17) and its chat
-extension (ADR 23), and advertises `registrar: false`; the Registrar tier is
-not built yet. 103mail.com production
+(ADR 23) and calendar (ADR 22) extensions, and advertises `registrar: false`;
+the Registrar tier is not built yet. 103mail.com production
 still runs on PHP until the cutover.
 
 ## Related repositories

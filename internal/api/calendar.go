@@ -119,16 +119,27 @@ func (s *Server) handleCalendar(w http.ResponseWriter, r *http.Request, req *req
 			if meetingID == 0 {
 				return nil, http.StatusBadRequest
 			}
-			willAttend := req.strPtr("willAttend")
-			if willAttend == nil {
-				return true, http.StatusOK
+			// An answer, from anyone invited, for the meeting or with
+			// occurrence for one occurrence of it (RFC 15.5).
+			if willAttend := req.strPtr("willAttend"); willAttend != nil {
+				switch *willAttend {
+				case "yes", "no", "maybe":
+				default:
+					return nil, http.StatusBadRequest
+				}
+				out, err := s.calendar.SetRSVP(ctx, customerID, meetingID, *willAttend, req.str("occurrence"))
+				return s.result(w, r, out, err)
 			}
-			switch *willAttend {
-			case "yes", "no", "maybe":
-			default:
+			// A change, from the organizer only, which is a new revision
+			// (ADR 22). A body with neither changes nothing.
+			change, ok, valid := meetingChange(req)
+			if !valid {
 				return nil, http.StatusBadRequest
 			}
-			out, err := s.calendar.SetRSVP(ctx, customerID, meetingID, *willAttend)
+			if !ok {
+				return true, http.StatusOK
+			}
+			out, err := s.calendar.UpdateMeeting(ctx, customerID, meetingID, change)
 			return s.result(w, r, out, err)
 
 		case http.MethodDelete:
@@ -146,15 +157,19 @@ func (s *Server) handleCalendar(w http.ResponseWriter, r *http.Request, req *req
 		if meetingID == 0 {
 			return nil, http.StatusBadRequest
 		}
-		if req.Method != http.MethodPost {
-			return nil, http.StatusMethodNotAllowed
-		}
 		address := req.str("email")
 		if address == "" {
 			return nil, http.StatusBadRequest
 		}
-		out, err := s.calendar.AddAttendee(ctx, customerID, meetingID, address)
-		return s.result(w, r, out, err)
+		switch req.Method {
+		case http.MethodPost:
+			out, err := s.calendar.AddAttendee(ctx, customerID, meetingID, address)
+			return s.result(w, r, out, err)
+		case http.MethodDelete:
+			out, err := s.calendar.RemoveAttendee(ctx, customerID, meetingID, address)
+			return s.result(w, r, out, err)
+		}
+		return nil, http.StatusMethodNotAllowed
 
 	case "document":
 		id := parseID(req.ID)
@@ -190,6 +205,32 @@ func (s *Server) handleCalendar(w http.ResponseWriter, r *http.Request, req *req
 		return nil, http.StatusMethodNotAllowed
 	}
 	return nil, http.StatusNotFound
+}
+
+// meetingChange reads the fields of a meeting a PUT changes. ok is false
+// when the body names none, and valid false when one cannot be read.
+func meetingChange(req *request) (calendar.Change, bool, bool) {
+	ch := calendar.Change{
+		Occurrence:      req.str("occurrence"),
+		Status:          req.strPtr("status"),
+		Title:           req.strPtr("title"),
+		DescriptionHTML: req.strPtr("descriptionHtml"),
+		TimeZone:        req.strPtr("timeZone"),
+		IsAllDay:        req.boolPtr("isAllDay"),
+		RepeatRule:      req.strPtr("repeatRule"),
+	}
+	for key, field := range map[string]**time.Time{"startTime": &ch.StartTime, "endTime": &ch.EndTime} {
+		if v := req.strPtr(key); v != nil {
+			t, err := parseDateTime(*v)
+			if err != nil {
+				return ch, false, false
+			}
+			*field = &t
+		}
+	}
+	ok := ch.Status != nil || ch.Title != nil || ch.DescriptionHTML != nil || ch.TimeZone != nil ||
+		ch.IsAllDay != nil || ch.RepeatRule != nil || ch.StartTime != nil || ch.EndTime != nil
+	return ch, ok, true
 }
 
 // parseDate reads a calendar day boundary.

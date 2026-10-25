@@ -128,6 +128,8 @@ CREATE TABLE "domain" (
     "max_attachment_bytes" bigint NOT NULL DEFAULT 26214400,
     "discovered_at" timestamp,
     "discovery_failed_at" timestamp,
+    "has_chat" boolean NOT NULL DEFAULT 0,
+    "has_calendar" boolean NOT NULL DEFAULT 0,
     CONSTRAINT "fk_domain_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE
 );
 CREATE INDEX "domain_customer_id" ON "domain" ("customer_id");
@@ -212,16 +214,6 @@ CREATE TABLE "g_attachment" (
 CREATE INDEX "g_attachment_thread_id" ON "g_attachment" ("g_message_id");
 CREATE INDEX "g_attachment_federation_id" ON "g_attachment" ("federation_id");
 
-CREATE TABLE "g_attendee" (
-    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-    "g_meeting_id" bigint NOT NULL,
-    "email" varchar(255) NOT NULL,
-    "will_attend" TEXT NOT NULL DEFAULT 'maybe',
-    "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT "fk_g_attendee_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE
-);
-CREATE INDEX "g_attendee_g_meeting_id" ON "g_attendee" ("g_meeting_id");
-
 CREATE TABLE "g_chat" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
     "type" TEXT NOT NULL,
@@ -270,34 +262,72 @@ CREATE TABLE "g_chat_participant" (
 );
 CREATE INDEX "g_chat_participant_g_chat_id" ON "g_chat_participant" ("g_chat_id");
 
-CREATE TABLE "g_document" (
-    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-    "g_meeting_id" bigint NOT NULL,
-    "file_name" varchar(255) NOT NULL,
-    "mime_type" varchar(255) NOT NULL,
-    "file_size" integer NOT NULL,
-    "hash_md5" varchar(255) NOT NULL,
-    CONSTRAINT "fk_g_document_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE
-);
-CREATE INDEX "g_document_g_meeting_id" ON "g_document" ("g_meeting_id");
-
 CREATE TABLE "g_meeting" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-    "g_schedule" bigint,
+    "federation_id" varchar(36) NOT NULL UNIQUE,
+    "organizer_email" varchar(255) NOT NULL,
+    "organizer_name" varchar(255) NOT NULL DEFAULT '',
+    "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX "g_meeting_federation_id" ON "g_meeting" ("federation_id");
+
+CREATE TABLE "g_meeting_revision" (
+    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+    "g_meeting_id" bigint NOT NULL,
+    "revision" integer NOT NULL,
+    "status" varchar(16) NOT NULL DEFAULT 'confirmed',
     "title" varchar(255) NOT NULL,
+    "description" text NOT NULL,
+    "description_html" text,
     "start_time" timestamp NOT NULL,
     "end_time" timestamp NOT NULL,
     "time_zone" varchar(255) NOT NULL,
     "is_all_day" boolean NOT NULL DEFAULT 0,
-    "organizer_email" varchar(255) NOT NULL,
-    "organizer_name" varchar(255) NOT NULL,
-    "description" text NOT NULL,
-    "description_html" text,
-    "created_at" timestamp DEFAULT CURRENT_TIMESTAMP,
-    "sent_at" timestamp,
-    CONSTRAINT "fk_g_meeting_g_schedule" FOREIGN KEY ("g_schedule") REFERENCES "g_schedule" ("id")
+    "repeat" text,
+    "overrides" text,
+    "first_start" timestamp NOT NULL,
+    "last_end" timestamp,
+    "changed_at" timestamp NOT NULL,
+    "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "fk_g_meeting_revision_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE
 );
-CREATE INDEX "g_meeting_g_schedule" ON "g_meeting" ("g_schedule");
+CREATE UNIQUE INDEX "meeting_revision" ON "g_meeting_revision" ("g_meeting_id", "revision");
+CREATE INDEX "first_start" ON "g_meeting_revision" ("first_start");
+
+CREATE TABLE "g_meeting_attendee" (
+    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+    "g_meeting_revision_id" bigint NOT NULL,
+    "email" varchar(255) NOT NULL,
+    CONSTRAINT "fk_g_meeting_attendee_g_meeting_revision_id" FOREIGN KEY ("g_meeting_revision_id") REFERENCES "g_meeting_revision" ("id") ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX "revision_email" ON "g_meeting_attendee" ("g_meeting_revision_id", "email");
+CREATE INDEX "email" ON "g_meeting_attendee" ("email");
+
+CREATE TABLE "g_meeting_rsvp" (
+    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+    "g_meeting_id" bigint NOT NULL,
+    "email" varchar(255) NOT NULL,
+    "will_attend" TEXT NOT NULL,
+    "revision" integer NOT NULL,
+    "occurrence" varchar(32),
+    "answered_at" timestamp NOT NULL,
+    "created_at" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "fk_g_meeting_rsvp_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE
+);
+CREATE INDEX "meeting_email" ON "g_meeting_rsvp" ("g_meeting_id", "email");
+
+CREATE TABLE "g_meeting_document" (
+    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
+    "g_meeting_revision_id" bigint NOT NULL,
+    "federation_id" varchar(36) NOT NULL,
+    "file_name" varchar(255) NOT NULL,
+    "mime_type" varchar(255) NOT NULL,
+    "file_size" integer NOT NULL,
+    "hash_md5" varchar(255) NOT NULL,
+    "hash_sha256" varchar(64) NOT NULL,
+    CONSTRAINT "fk_g_meeting_document_g_meeting_revision_id" FOREIGN KEY ("g_meeting_revision_id") REFERENCES "g_meeting_revision" ("id") ON DELETE CASCADE
+);
+CREATE INDEX "g_meeting_revision_id" ON "g_meeting_document" ("g_meeting_revision_id");
 
 CREATE TABLE "g_message" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -313,19 +343,6 @@ CREATE TABLE "g_message" (
 );
 CREATE INDEX "g_message_g_thread_id" ON "g_message" ("g_thread_id");
 CREATE INDEX "g_message_federation_id" ON "g_message" ("federation_id");
-
-CREATE TABLE "g_schedule" (
-    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-    "start_time" timestamp NOT NULL,
-    "end_time" timestamp NOT NULL,
-    "time_zone" varchar(255) NOT NULL,
-    "repeat_rule" text NOT NULL,
-    "recurrence_dates" text NOT NULL,
-    "exception_dates" text NOT NULL,
-    "repeat_rule_human_readable" varchar(255) NOT NULL,
-    "created_at" timestamp DEFAULT CURRENT_TIMESTAMP,
-    "sent_at" timestamp
-);
 
 CREATE TABLE "g_subscription" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -379,17 +396,16 @@ CREATE TABLE "meeting" (
     "customer_id" bigint NOT NULL,
     "g_meeting_id" bigint NOT NULL,
     "mailbox_id" bigint NOT NULL,
-    "schedule_id" bigint,
-    "will_attend" TEXT,
+    "seen_revision" integer NOT NULL DEFAULT 0,
+    "deleted_at" timestamp,
     CONSTRAINT "fk_meeting_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE,
     CONSTRAINT "fk_meeting_mailbox_id" FOREIGN KEY ("mailbox_id") REFERENCES "mailbox" ("id") ON DELETE CASCADE,
-    CONSTRAINT "fk_meeting_schedule_id" FOREIGN KEY ("schedule_id") REFERENCES "schedule" ("id"),
     CONSTRAINT "fk_meeting_g_meeting_id" FOREIGN KEY ("g_meeting_id") REFERENCES "g_meeting" ("id") ON DELETE CASCADE
 );
 CREATE INDEX "meeting_customer_id" ON "meeting" ("customer_id");
 CREATE INDEX "meeting_g_meeting_id" ON "meeting" ("g_meeting_id");
 CREATE INDEX "meeting_mailbox_id" ON "meeting" ("mailbox_id");
-CREATE INDEX "schedule_id" ON "meeting" ("schedule_id");
+CREATE UNIQUE INDEX "mailbox_meeting" ON "meeting" ("mailbox_id", "g_meeting_id");
 
 CREATE TABLE "message" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -453,19 +469,6 @@ CREATE INDEX "reminder_event_g_meeting_id" ON "reminder_event" ("g_meeting_id");
 CREATE INDEX "reminder_event_mailbox_id" ON "reminder_event" ("mailbox_id");
 CREATE INDEX "scheduled_at" ON "reminder_event" ("scheduled_at");
 CREATE INDEX "sent_at" ON "reminder_event" ("sent_at");
-
-CREATE TABLE "schedule" (
-    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-    "customer_id" bigint NOT NULL,
-    "g_schedule_id" bigint NOT NULL,
-    "mailbox_id" bigint NOT NULL,
-    CONSTRAINT "fk_schedule_customer_id" FOREIGN KEY ("customer_id") REFERENCES "customer" ("id") ON DELETE CASCADE,
-    CONSTRAINT "fk_schedule_mailbox_id" FOREIGN KEY ("mailbox_id") REFERENCES "mailbox" ("id") ON DELETE CASCADE,
-    CONSTRAINT "fk_schedule_g_schedule_id" FOREIGN KEY ("g_schedule_id") REFERENCES "g_schedule" ("id") ON DELETE CASCADE
-);
-CREATE INDEX "schedule_customer_id" ON "schedule" ("customer_id");
-CREATE INDEX "g_schedule_id" ON "schedule" ("g_schedule_id");
-CREATE INDEX "schedule_mailbox_id" ON "schedule" ("mailbox_id");
 
 CREATE TABLE "sent_email" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,

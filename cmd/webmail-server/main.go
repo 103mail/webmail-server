@@ -167,10 +167,20 @@ func run(log *slog.Logger) error {
 		chats.OnReceived(bridge.PushReceived)
 	}
 
+	// And so do meetings: the organizer's Domain sends every revision, each
+	// attendee's Domain their answers, and the mail domain tells an organizer
+	// who an invitation did not reach (RFC 15).
+	meetings := calendar.New(db, documents)
+	meetings.NotifyBy(mail)
+	if fed.Enabled() {
+		meetings.Federate(fed)
+		fed.AttachCalendar(meetings)
+	}
+
 	server := api.New(cfg, log,
 		auth.New(db),
 		mail,
-		calendar.New(db, documents),
+		meetings,
 		chats,
 		receiver, verifier, fed,
 		// The chat WebSocket bridge. Connections terminate in ws2api, so this

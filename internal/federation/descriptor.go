@@ -25,6 +25,9 @@ type Descriptor struct {
 	// Chat is whether the Domain implements the chat extension. A Domain
 	// that does also lists version 0.3, which is what is pinned (RFC 14.1).
 	Chat bool `json:"chat,omitempty"`
+	// Calendar is whether the Domain implements the calendar extension,
+	// also on version 0.3 (RFC 15.1).
+	Calendar bool `json:"calendar,omitempty"`
 }
 
 // Defaults a descriptor takes when it does not state them (RFC 4.2).

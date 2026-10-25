@@ -22,13 +22,16 @@ Split every shared object into a canonical row and per-user projection rows.
 
 Canonical tables are prefixed `g_` and hold the content: `g_thread`, `g_message`,
 `g_attachment`, `g_subscription`, `g_chat`, `g_chat_message`,
-`g_chat_attachment`, `g_chat_participant`, `g_schedule`, `g_meeting`,
-`g_attendee`, `g_document`. They are immutable to end users.
+`g_chat_attachment`, `g_chat_participant`, `g_meeting`, `g_meeting_revision`,
+`g_meeting_attendee`, `g_meeting_rsvp`, `g_meeting_document`. They are
+immutable to end users. A meeting changes by stacking revisions, not by
+editing rows (ADR 22).
 
 Projection tables hold per-user state and are keyed by `customer_id`: `thread`,
-`message`, `attachment`, `chat`, `chat_message`, `schedule`, `meeting`. They
-carry `read_at`, `deleted_at`, folder placement, RSVP state and notification
-preference.
+`message`, `attachment`, `chat`, `chat_message`, `meeting`. They carry
+`read_at`, `deleted_at`, `seen_revision`, folder placement and notification
+preference. An answer to a meeting is a `g_meeting_rsvp` row, not projection
+state, because every attendee sees every answer (RFC 15.5).
 
 Visibility follows from the existence of a projection row, plus membership in
 `g_subscription` or `g_chat_participant` by email. There is no separate ACL.

@@ -157,6 +157,10 @@ Table "domain" {
   "max_attachment_bytes" bigint [not null, default: 26214400]
   "discovered_at" timestamp
   "discovery_failed_at" timestamp
+  // The extensions the peer's descriptor advertises (RFC 14.1, 15.1). Both
+  // ride on version 0.3, so the version list alone cannot tell them apart.
+  "has_chat" boolean [not null, default: false]
+  "has_calendar" boolean [not null, default: false]
 
   indexes {
     ("customer_id") [name: "customer_id"]
@@ -274,18 +278,6 @@ Table "g_attachment" {
   }
 }
 
-Table "g_attendee" {
-  "id" bigint [pk, increment, not null]
-  "g_meeting_id" bigint [not null]
-  "email" varchar(255) [not null]
-  "will_attend" will_attend [not null, default: 'maybe']
-  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
-
-  indexes {
-    ("g_meeting_id") [name: "g_meeting_id"]
-  }
-}
-
 Table "g_chat" {
   "id" bigint [pk, increment, not null]
   "type" g_chat_type [not null]
@@ -343,36 +335,105 @@ Table "g_chat_participant" {
   }
 }
 
-Table "g_document" {
+// A meeting, as g_thread is a thread: who organizes it and nothing that
+// changes. What it is at any time is its revisions (ADR 22, RFC 15.3).
+Table "g_meeting" {
   "id" bigint [pk, increment, not null]
-  "g_meeting_id" bigint [not null]
-  "file_name" varchar(255) [not null]
-  "mime_type" varchar(255) [not null]
-  "file_size" integer [not null]
-  "hash_md5" varchar(255) [not null]
+  // Stable across Domains, chosen by the organizer's Domain (RFC 15.2).
+  "federation_id" varchar(36) [unique, not null]
+  "organizer_email" varchar(255) [not null]
+  "organizer_name" varchar(255) [not null, default: '']
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
 
   indexes {
-    ("g_meeting_id") [name: "g_meeting_id"]
+    ("federation_id") [name: "g_meeting_federation_id"]
   }
 }
 
-Table "g_meeting" {
+// One revision of a meeting, as g_message is one message: the whole meeting
+// as the organizer's Domain said it was. Written once, never changed. Times
+// are UTC; a series holds its first occurrence and its rule, never the
+// expansion (ADR 22).
+Table "g_meeting_revision" {
   "id" bigint [pk, increment, not null]
-  "g_schedule" bigint
+  "g_meeting_id" bigint [not null]
+  "revision" integer [not null]
+  "status" varchar(16) [not null, default: 'confirmed']
   "title" varchar(255) [not null]
+  "description" text [not null]
+  "description_html" text
   "start_time" timestamp [not null]
   "end_time" timestamp [not null]
   "time_zone" varchar(255) [not null]
   "is_all_day" boolean [not null, default: false]
-  "organizer_email" varchar(255) [not null]
-  "organizer_name" varchar(255) [not null]
-  "description" text [not null]
-  "description_html" text
-  "created_at" timestamp [default: `CURRENT_TIMESTAMP`]
-  "sent_at" timestamp
+  // The JSON of RFC 15.6, as the envelope carries it. Null for a single
+  // meeting.
+  "repeat" text
+  "overrides" text
+  // Where the meeting can fall: the earliest start and the latest end of any
+  // occurrence, null for a series without end. A calendar reads only the
+  // meetings these put in its range, and expands those.
+  "first_start" timestamp [not null]
+  "last_end" timestamp
+  // When the organizer made the change, and when it was stored here.
+  "changed_at" timestamp [not null]
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
 
   indexes {
-    ("g_schedule") [name: "g_schedule"]
+    ("g_meeting_id", "revision") [unique, name: "meeting_revision"]
+    ("first_start") [name: "first_start"]
+  }
+}
+
+// Who a revision invites, the organizer included. A revision lists all of
+// them, so who is invited is read from the latest revision alone.
+Table "g_meeting_attendee" {
+  "id" bigint [pk, increment, not null]
+  "g_meeting_revision_id" bigint [not null]
+  "email" varchar(255) [not null]
+
+  indexes {
+    ("g_meeting_revision_id", "email") [unique, name: "revision_email"]
+    ("email") [name: "email"]
+  }
+}
+
+// One answer, stacked on the attendee's earlier ones. Whose answer counts is
+// the latest by answered_at; for an occurrence, the later of the answer for it
+// and the answer for the whole meeting, which has no occurrence (RFC 15.5).
+Table "g_meeting_rsvp" {
+  "id" bigint [pk, increment, not null]
+  "g_meeting_id" bigint [not null]
+  "email" varchar(255) [not null]
+  "will_attend" will_attend [not null]
+  // The revision answered, and the occurrence: its start by the rule, in the
+  // wire's timestamp form.
+  "revision" integer [not null]
+  "occurrence" varchar(32)
+  "answered_at" timestamp [not null]
+  "created_at" timestamp [not null, default: `CURRENT_TIMESTAMP`]
+
+  indexes {
+    ("g_meeting_id", "email") [name: "meeting_email"]
+  }
+}
+
+// The documents of one revision, which carries all of them (RFC 15.3). The
+// bytes are stored once per hash, so a document repeated in later revisions
+// costs a row, not a copy.
+Table "g_meeting_document" {
+  "id" bigint [pk, increment, not null]
+  "g_meeting_revision_id" bigint [not null]
+  // What the envelope names the document by, the same in every revision.
+  "federation_id" varchar(36) [not null]
+  "file_name" varchar(255) [not null]
+  "mime_type" varchar(255) [not null]
+  "file_size" integer [not null]
+  "hash_md5" varchar(255) [not null]
+  "hash_sha256" varchar(64) [not null]
+
+  indexes {
+    ("g_meeting_revision_id") [name: "g_meeting_revision_id"]
   }
 }
 
@@ -391,19 +452,6 @@ Table "g_message" {
     ("g_thread_id") [name: "g_thread_id"]
     ("federation_id") [name: "federation_id"]
   }
-}
-
-Table "g_schedule" {
-  "id" bigint [pk, increment, not null]
-  "start_time" timestamp [not null]
-  "end_time" timestamp [not null]
-  "time_zone" varchar(255) [not null]
-  "repeat_rule" text [not null]
-  "recurrence_dates" text [not null]
-  "exception_dates" text [not null]
-  "repeat_rule_human_readable" varchar(255) [not null]
-  "created_at" timestamp [default: `CURRENT_TIMESTAMP`]
-  "sent_at" timestamp
 }
 
 Table "g_subscription" {
@@ -463,19 +511,23 @@ Table "mailbox" {
   }
 }
 
+// A customer's copy of a meeting, one per meeting, not per occurrence.
+// seen_revision does for a meeting what read_at does for a message. Deleting
+// hides it until a new revision arrives, and is not an answer (ADR 22, RFC
+// 15.7).
 Table "meeting" {
   "id" bigint [pk, increment, not null]
   "customer_id" bigint [not null]
   "g_meeting_id" bigint [not null]
   "mailbox_id" bigint [not null]
-  "schedule_id" bigint
-  "will_attend" will_attend
+  "seen_revision" integer [not null, default: 0]
+  "deleted_at" timestamp
 
   indexes {
     ("customer_id") [name: "customer_id"]
     ("g_meeting_id") [name: "g_meeting_id"]
     ("mailbox_id") [name: "mailbox_id"]
-    ("schedule_id") [name: "schedule_id"]
+    ("mailbox_id", "g_meeting_id") [unique, name: "mailbox_meeting"]
   }
 }
 
@@ -541,19 +593,6 @@ Table "reminder_event" {
     ("mailbox_id") [name: "mailbox_id"]
     ("scheduled_at") [name: "scheduled_at"]
     ("sent_at") [name: "sent_at"]
-  }
-}
-
-Table "schedule" {
-  "id" bigint [pk, increment, not null]
-  "customer_id" bigint [not null]
-  "g_schedule_id" bigint [not null]
-  "mailbox_id" bigint [not null]
-
-  indexes {
-    ("customer_id") [name: "customer_id"]
-    ("g_schedule_id") [name: "g_schedule_id"]
-    ("mailbox_id") [name: "mailbox_id"]
   }
 }
 
@@ -710,12 +749,13 @@ Ref: "domain"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "folder"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "folder"."mailbox_id" > "mailbox"."id" [delete: cascade]
 Ref: "g_attachment"."g_message_id" > "g_message"."id" [delete: cascade]
-Ref: "g_attendee"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
 Ref: "g_chat_attachment"."g_chat_message_id" > "g_chat_message"."id" [delete: cascade]
 Ref: "g_chat_message"."g_chat_id" > "g_chat"."id" [delete: cascade]
 Ref: "g_chat_participant"."g_chat_id" > "g_chat"."id" [delete: cascade]
-Ref: "g_document"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
-Ref: "g_meeting"."g_schedule" > "g_schedule"."id"
+Ref: "g_meeting_attendee"."g_meeting_revision_id" > "g_meeting_revision"."id" [delete: cascade]
+Ref: "g_meeting_document"."g_meeting_revision_id" > "g_meeting_revision"."id" [delete: cascade]
+Ref: "g_meeting_rsvp"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
+Ref: "g_meeting_revision"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
 Ref: "g_message"."g_thread_id" > "g_thread"."id" [delete: cascade]
 Ref: "g_subscription"."g_thread_id" > "g_thread"."id" [delete: cascade]
 Ref: "mailbox"."default_folder_id" > "folder"."id" [delete: "set null"]
@@ -724,7 +764,6 @@ Ref: "mailbox"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "mailbox"."user_id" > "user"."id" [delete: "set null"]
 Ref: "meeting"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "meeting"."mailbox_id" > "mailbox"."id" [delete: cascade]
-Ref: "meeting"."schedule_id" > "schedule"."id"
 Ref: "meeting"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
 Ref: "message"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "message"."thread_id" > "thread"."id" [delete: cascade]
@@ -736,9 +775,6 @@ Ref: "presence_status"."user_id" > "user"."id" [delete: cascade]
 Ref: "reminder_event"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "reminder_event"."mailbox_id" > "mailbox"."id" [delete: cascade]
 Ref: "reminder_event"."g_meeting_id" > "g_meeting"."id" [delete: cascade]
-Ref: "schedule"."customer_id" > "customer"."id" [delete: cascade]
-Ref: "schedule"."mailbox_id" > "mailbox"."id" [delete: cascade]
-Ref: "schedule"."g_schedule_id" > "g_schedule"."id" [delete: cascade]
 Ref: "sent_email"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "thread"."customer_id" > "customer"."id" [delete: cascade]
 Ref: "thread"."folder_id" > "folder"."id" [delete: cascade]
